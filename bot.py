@@ -1,17 +1,12 @@
 """
 ScoutBot — Railway Edition
-Diferenças do local:
-- PUBLIC_URL vem de variável de ambiente do Railway
-- Vídeos salvos em /data (volume persistente)
-- Link da seleção de área enviado pelo próprio bot no Telegram
 """
 
-import os, cv2, csv, json, subprocess, threading, time, logging, asyncio, uuid, re
+import os, cv2, csv, subprocess, threading, time, logging, asyncio, uuid, re
 from pathlib import Path
 from datetime import datetime
 
 import numpy as np
-import requests
 import yt_dlp
 from flask import Flask, render_template, request, jsonify, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -21,13 +16,12 @@ from telegram.ext import (
 )
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
-CHAT_ID     = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL  = os.environ.get("PUBLIC_URL", "http://localhost:5055")  # ex: https://scoutbot.railway.app
-PORT        = int(os.environ.get("PORT", 5055))
-
-WORK_DIR    = Path(os.environ.get("WORK_DIR", "/data"))
-CSV_PATH    = WORK_DIR / "gols.csv"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
+CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
+PORT       = int(os.environ.get("PORT", 5055))
+WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
+CSV_PATH   = WORK_DIR / "gols.csv"
 
 SECONDS_BEFORE = 15
 MIN_STATIC     = 1.0
@@ -36,16 +30,11 @@ PADDING_AFTER  = 2
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s — %(message)s", level=logging.INFO)
 log = logging.getLogger("scoutbot")
 
-# ─── ESTADO GLOBAL ───────────────────────────────────────────────────────────
-# sessions: session_id -> {frame_b64, roi, roi_ready, video_path, video_name}
 sessions: dict[str, dict] = {}
-pending_clips: dict[str, dict] = {}   # clip_id -> {path, timestamp, video_origem}
+pending_clips: dict[str, dict] = {}
 
 # ─── CSV ─────────────────────────────────────────────────────────────────────
 def csv_ensure():
@@ -77,8 +66,7 @@ def get_first_frame_b64(video_path: str) -> str:
     if not ret:
         return ""
     h, w = frame.shape[:2]
-    new_w = 960
-    frame = cv2.resize(frame, (new_w, int(h * new_w / w)))
+    frame = cv2.resize(frame, (960, int(h * 960 / w)))
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return base64.b64encode(buf).decode()
 
@@ -109,7 +97,7 @@ def detectar_mudancas(video_path: str, X, Y, W, H) -> list:
             break
         crop = frame[Y:Y+H, X:X+W]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5,5), 0)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
         tempo = frame_id / fps
 
         if prev is not None:
@@ -143,12 +131,53 @@ def cortar_clip(video_path: str, change_time: float, output: str) -> bool:
     ], capture_output=True)
     return os.path.exists(output)
 
+def _download_url(url: str, session_id: str):
+    """Download com yt-dlp. Tenta vários formatos em sequência."""
+    base_out = str(WORK_DIR / f"video_{session_id}")
+
+    # Lista de formatos para tentar, do mais simples ao mais compatível
+    formatos = [
+        "b[ext=mp4]/bv*[ext=mp4]+ba[ext=m4a]/b",
+        "best[ext=mp4]/best",
+        "bestvideo+bestaudio/best",
+        "worst",
+    ]
+
+    last_error = ""
+    for fmt in formatos:
+        ydl_opts = {
+            "format": fmt,
+            "outtmpl": base_out + ".%(ext)s",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "merge_output_format": "mp4",
+            # cookies do navegador ajudam com vídeos que precisam de login
+            # "cookiesfrombrowser": ("chrome",),
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_name = info.get("title", f"video_{session_id}") + ".mp4"
+
+            candidates = list(WORK_DIR.glob(f"video_{session_id}.*"))
+            if candidates:
+                log.info(f"Download OK com formato: {fmt}")
+                return str(candidates[0]), video_name, None
+
+        except Exception as e:
+            last_error = str(e)
+            log.warning(f"Formato {fmt} falhou: {e}")
+            continue
+
+    return None, None, last_error
+
 # ─── FLASK ───────────────────────────────────────────────────────────────────
 flask_app = Flask(__name__, template_folder="templates")
 
 @flask_app.route("/")
 def index():
-    return "<h2>⚽ ScoutBot online!</h2><p>Mande um vídeo no Telegram para começar.</p>"
+    return "<h2>⚽ ScoutBot online!</h2><p>Mande um link do YouTube no Telegram para começar.</p>"
 
 @flask_app.route("/roi/<session_id>")
 def roi_page(session_id):
@@ -161,7 +190,7 @@ def api_frame(session_id):
     s = sessions.get(session_id)
     if not s:
         return jsonify({"ready": False})
-    return jsonify({"frame": s.get("frame_b64",""), "ready": bool(s.get("frame_b64"))})
+    return jsonify({"frame": s.get("frame_b64", ""), "ready": bool(s.get("frame_b64"))})
 
 @flask_app.route("/api/roi/<session_id>", methods=["POST"])
 def api_roi(session_id):
@@ -179,7 +208,7 @@ def api_roi(session_id):
 
     s["roi"] = (X, Y, W, H)
     s["roi_ready"] = True
-    log.info(f"ROI salvo para sessão {session_id}: {X},{Y},{W},{H}")
+    log.info(f"ROI salvo sessão {session_id}: {X},{Y},{W},{H}")
     return jsonify({"ok": True, "roi": [X, Y, W, H]})
 
 @flask_app.route("/api/csv")
@@ -192,15 +221,16 @@ def run_flask():
 
 # ─── BOT ─────────────────────────────────────────────────────────────────────
 AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST = range(5)
+URL_PATTERN = re.compile(r'https?://\S+')
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚽ *ScoutBot ativo!*\n\n"
-        "Manda um vídeo aqui.\n"
-        "Eu processo, detecto os gols e te mando os clipes.\n\n"
+        "Cola um link do YouTube aqui e eu processo.\n"
+        "Funciona com vídeos de até 4 horas.\n\n"
         "Comandos:\n"
         "/csv — baixar planilha de gols\n"
-        "/cancelar — cancelar registro",
+        "/cancelar — cancelar registro em andamento",
         parse_mode="Markdown"
     )
 
@@ -213,12 +243,13 @@ async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Aceita arquivo de vídeo enviado diretamente (até 50MB)."""
     file_obj = update.message.video or update.message.document
     if not file_obj:
         return
 
     session_id = str(uuid.uuid4())[:8]
-    await update.message.reply_text("📥 Baixando vídeo... aguarda.")
+    await update.message.reply_text("📥 Baixando arquivo... aguarda.")
 
     tg_file = await ctx.bot.get_file(file_obj.file_id)
     video_path = str(WORK_DIR / f"video_{session_id}.mp4")
@@ -234,43 +265,43 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "roi": None,
         "roi_ready": False,
     }
-
-    # Guarda sessão no contexto do usuário para o /pronto saber qual usar
     ctx.user_data["session_id"] = session_id
 
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
-
     await update.message.reply_text(
         f"✅ Vídeo recebido!\n\n"
-        f"👇 Abra o link abaixo e marque a área do placar:\n"
-        f"{roi_url}\n\n"
-        f"Depois volte aqui e mande /pronto",
-        disable_web_page_preview=False
+        f"👇 Abra e marque a área do placar:\n{roi_url}\n\n"
+        f"Depois mande /pronto",
+        disable_web_page_preview=True
     )
 
-URL_PATTERN = re.compile(r'https?://\S+')
-
 async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Aceita mensagem de texto com link de vídeo (VK, YouTube, etc)."""
+    """Aceita link de texto do YouTube."""
     text = update.message.text.strip()
     match = URL_PATTERN.search(text)
     if not match:
-        return  # não é link, ignora
+        return
 
     url = match.group(0)
     session_id = str(uuid.uuid4())[:8]
     ctx.user_data["session_id"] = session_id
 
-    msg = await update.message.reply_text("🔗 Link recebido! Baixando vídeo no servidor... pode demorar alguns minutos para vídeos longos ⏳")
+    msg = await update.message.reply_text(
+        "⏳ Baixando vídeo no servidor Railway...\n"
+        "Para vídeos longos pode levar alguns minutos."
+    )
 
-    # baixa em thread para não travar o bot
     loop = asyncio.get_event_loop()
     video_path, video_name, error = await loop.run_in_executor(
         None, _download_url, url, session_id
     )
 
     if error or not video_path:
-        await msg.edit_text(f"❌ Erro ao baixar vídeo:\n{error}\n\nVerifica se o link está correto e é público.")
+        await msg.edit_text(
+            f"❌ Erro ao baixar vídeo:\n`{error}`\n\n"
+            "Verifica se o link é público e tenta de novo.",
+            parse_mode="Markdown"
+        )
         return
 
     frame_b64 = get_first_frame_b64(video_path)
@@ -284,51 +315,30 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
     await msg.edit_text(
-        f"✅ Vídeo baixado: *{video_name}*\n\n"
-        f"👇 Abra o link e marque a área do placar:\n{roi_url}\n\n"
+        f"✅ *{video_name}*\n\n"
+        f"👇 Abra e marque a área do placar:\n{roi_url}\n\n"
         f"Depois volte aqui e mande /pronto",
         parse_mode="Markdown",
         disable_web_page_preview=True
     )
 
-def _download_url(url: str, session_id: str):
-    out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-    ydl_opts = {
-        "format": "best[height<=720]/best",
-        "outtmpl": str(WORK_DIR / f"video_{session_id}"),
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_name = info.get("title", f"video_{session_id}") + ".mp4"
-        # yt-dlp pode adicionar extensão diferente, pega o arquivo gerado
-        candidates = list(WORK_DIR.glob(f"video_{session_id}*"))
-        if not candidates:
-            return None, None, "Arquivo não encontrado após download"
-        return str(candidates[0]), video_name, None
-    except Exception as e:
-        return None, None, str(e)
-
 async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = ctx.user_data.get("session_id")
     if not session_id or session_id not in sessions:
-        await update.message.reply_text("❌ Nenhum vídeo em processamento. Manda um vídeo primeiro.")
+        await update.message.reply_text("❌ Nenhum vídeo em processamento. Manda um link primeiro.")
         return
 
     s = sessions[session_id]
     if not s.get("roi_ready"):
         roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
         await update.message.reply_text(
-            f"⚠️ Você ainda não selecionou a área!\n\n"
+            f"⚠️ Área do placar não selecionada ainda!\n\n"
             f"Acesse: {roi_url}\n"
-            f"Arraste para marcar o placar e clique Confirmar."
+            f"Arraste para marcar e clique Confirmar."
         )
         return
 
-    await update.message.reply_text("🔍 Analisando vídeo completo... pode demorar alguns minutos ☕")
+    await update.message.reply_text("🔍 Analisando vídeo... pode demorar alguns minutos ☕")
 
     asyncio.get_event_loop().run_in_executor(
         None, lambda: asyncio.run(_processar(session_id, ctx))
@@ -340,17 +350,17 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     video_name = s["video_name"]
     X, Y, W, H = s["roi"]
 
-    await ctx.bot.send_message(CHAT_ID, f"⚙️ Detectando mudanças de placar em *{video_name}*...", parse_mode="Markdown")
+    await ctx.bot.send_message(CHAT_ID, f"⚙️ Detectando mudanças em *{video_name}*...", parse_mode="Markdown")
 
     changes = detectar_mudancas(video_path, X, Y, W, H)
 
     if not changes:
         await ctx.bot.send_message(CHAT_ID,
             "⚠️ Nenhuma mudança de placar detectada.\n"
-            "Tente mandar o vídeo de novo e selecionar uma área maior.")
+            "Tenta selecionar uma área maior do placar.")
         return
 
-    await ctx.bot.send_message(CHAT_ID, f"✅ {len(changes)} mudança(s) encontrada(s)! Cortando clipes...")
+    await ctx.bot.send_message(CHAT_ID, f"✅ {len(changes)} mudança(s) detectada(s)! Cortando clipes...")
 
     for i, change_time in enumerate(changes):
         clip_id = f"{session_id}_{i}"
@@ -387,12 +397,11 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # limpa sessão do disco (mantém clipes até serem registrados)
     try: os.remove(video_path)
     except: pass
     sessions.pop(session_id, None)
 
-# ─── CONVERSA DE REGISTRO ────────────────────────────────────────────────────
+# ─── REGISTRO DE GOL ─────────────────────────────────────────────────────────
 async def cb_registrar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -419,7 +428,7 @@ async def recv_nome_gol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return AGUARD_ASSIST
 
 async def recv_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.strip().lower() in ("sim","s"):
+    if update.message.text.strip().lower() in ("sim", "s"):
         await update.message.reply_text("Número da camisa de quem assistiu:")
         return AGUARD_NUM_ASSIST
     await _salvar(update, ctx, "", "")
@@ -431,7 +440,7 @@ async def recv_num_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return AGUARD_NOME_ASSIST
 
 async def recv_nome_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await _salvar(update, ctx, ctx.user_data.get("num_assist",""), update.message.text.strip())
+    await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), update.message.text.strip())
     return ConversationHandler.END
 
 async def _salvar(update, ctx, num_assist, nome_assist):
@@ -439,14 +448,14 @@ async def _salvar(update, ctx, num_assist, nome_assist):
     csv_save({
         "data":            now.strftime("%d/%m/%Y"),
         "hora":            now.strftime("%H:%M:%S"),
-        "timestamp_video": ctx.user_data.get("timestamp",""),
-        "jogador_gol":     ctx.user_data.get("jogador_gol",""),
-        "num_gol":         ctx.user_data.get("num_gol",""),
+        "timestamp_video": ctx.user_data.get("timestamp", ""),
+        "jogador_gol":     ctx.user_data.get("jogador_gol", ""),
+        "num_gol":         ctx.user_data.get("num_gol", ""),
         "jogador_assist":  nome_assist,
         "num_assist":      num_assist,
-        "video_origem":    ctx.user_data.get("video_origem",""),
+        "video_origem":    ctx.user_data.get("video_origem", ""),
     })
-    clip_id = ctx.user_data.get("clip_id","")
+    clip_id = ctx.user_data.get("clip_id", "")
     if clip_id in pending_clips:
         try: os.remove(pending_clips[clip_id]["path"])
         except: pass
@@ -457,7 +466,7 @@ async def _salvar(update, ctx, num_assist, nome_assist):
         f"✅ *Gol salvo!*\n"
         f"⚽ #{ctx.user_data.get('num_gol','')} {ctx.user_data.get('jogador_gol','')}{assist_str}\n"
         f"🕐 {ctx.user_data.get('timestamp','')}\n\n"
-        f"_Registrado no CSV!_ Use /csv para baixar.",
+        f"_Use /csv para baixar a planilha._",
         parse_mode="Markdown"
     )
 
@@ -469,8 +478,7 @@ async def cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     csv_ensure()
     threading.Thread(target=run_flask, daemon=True).start()
-    log.info(f"🌐 Flask rodando na porta {PORT}")
-    log.info(f"🔗 URL pública: {PUBLIC_URL}")
+    log.info(f"🌐 Flask na porta {PORT} | URL: {PUBLIC_URL}")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -494,7 +502,7 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
-    log.info("🤖 Bot Telegram iniciado!")
+    log.info("🤖 Bot iniciado!")
     app.run_polling()
 
 if __name__ == "__main__":
