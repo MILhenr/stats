@@ -6,12 +6,13 @@ Diferenças do local:
 - Link da seleção de área enviado pelo próprio bot no Telegram
 """
 
-import os, cv2, csv, json, subprocess, threading, time, logging, asyncio, uuid
+import os, cv2, csv, json, subprocess, threading, time, logging, asyncio, uuid, re
 from pathlib import Path
 from datetime import datetime
 
 import numpy as np
 import requests
+import yt_dlp
 from flask import Flask, render_template, request, jsonify, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -247,6 +248,70 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=False
     )
 
+URL_PATTERN = re.compile(r'https?://\S+')
+
+async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Aceita mensagem de texto com link de vídeo (VK, YouTube, etc)."""
+    text = update.message.text.strip()
+    match = URL_PATTERN.search(text)
+    if not match:
+        return  # não é link, ignora
+
+    url = match.group(0)
+    session_id = str(uuid.uuid4())[:8]
+    ctx.user_data["session_id"] = session_id
+
+    msg = await update.message.reply_text("🔗 Link recebido! Baixando vídeo no servidor... pode demorar alguns minutos para vídeos longos ⏳")
+
+    # baixa em thread para não travar o bot
+    loop = asyncio.get_event_loop()
+    video_path, video_name, error = await loop.run_in_executor(
+        None, _download_url, url, session_id
+    )
+
+    if error or not video_path:
+        await msg.edit_text(f"❌ Erro ao baixar vídeo:\n{error}\n\nVerifica se o link está correto e é público.")
+        return
+
+    frame_b64 = get_first_frame_b64(video_path)
+    sessions[session_id] = {
+        "video_path": video_path,
+        "video_name": video_name,
+        "frame_b64": frame_b64,
+        "roi": None,
+        "roi_ready": False,
+    }
+
+    roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
+    await msg.edit_text(
+        f"✅ Vídeo baixado: *{video_name}*\n\n"
+        f"👇 Abra o link e marque a área do placar:\n{roi_url}\n\n"
+        f"Depois volte aqui e mande /pronto",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+def _download_url(url: str, session_id: str):
+    out_path = str(WORK_DIR / f"video_{session_id}.mp4")
+    ydl_opts = {
+        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best",
+        "outtmpl": str(WORK_DIR / f"video_{session_id}"),
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_name = info.get("title", f"video_{session_id}") + ".mp4"
+        # yt-dlp pode adicionar extensão diferente, pega o arquivo gerado
+        candidates = list(WORK_DIR.glob(f"video_{session_id}*"))
+        if not candidates:
+            return None, None, "Arquivo não encontrado após download"
+        return str(candidates[0]), video_name, None
+    except Exception as e:
+        return None, None, str(e)
+
 async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = ctx.user_data.get("session_id")
     if not session_id or session_id not in sessions:
@@ -427,6 +492,7 @@ def main():
     app.add_handler(CommandHandler("csv", cmd_csv))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
     log.info("🤖 Bot Telegram iniciado!")
     app.run_polling()
