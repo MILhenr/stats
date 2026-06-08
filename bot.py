@@ -131,18 +131,49 @@ def cortar_clip(video_path: str, change_time: float, output: str) -> bool:
     ], capture_output=True)
     return os.path.exists(output)
 
+def _convert_drive_url(url):
+    m = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
+    m = re.search(r'[?&]id=([a-zA-Z0-9_-]+)', url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
+    return url
+
+def _convert_dropbox_url(url):
+    url = re.sub(r'[?&]dl=0', '?dl=1', url)
+    if 'dl=1' not in url:
+        url += '?dl=1' if '?' not in url else '&dl=1'
+    url = url.replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+    return url
+
+def _download_direct(url, session_id):
+    import requests as req
+    out_path = WORK_DIR / f"video_{session_id}.mp4"
+    try:
+        with req.get(url, stream=True, timeout=600, allow_redirects=True) as r:
+            r.raise_for_status()
+            with open(out_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        if out_path.exists() and out_path.stat().st_size > 1000:
+            return str(out_path), out_path.name, None
+        return None, None, "Arquivo baixado está vazio"
+    except Exception as e:
+        return None, None, str(e)
+
 def _download_url(url: str, session_id: str):
-    """Download com yt-dlp. Tenta vários formatos em sequência."""
     base_out = str(WORK_DIR / f"video_{session_id}")
 
-    # Lista de formatos para tentar, do mais simples ao mais compatível
-    formatos = [
-        "best",
-        "worst",
-        "bestvideo+bestaudio/best",
-        "bestvideo*+bestaudio/best",
-    ]
+    if 'drive.google.com' in url:
+        log.info("Google Drive detectado")
+        return _download_direct(_convert_drive_url(url), session_id)
 
+    if 'dropbox.com' in url or 'dropboxusercontent.com' in url:
+        log.info("Dropbox detectado")
+        return _download_direct(_convert_dropbox_url(url), session_id)
+
+    formatos = ["best", "worst", "bestvideo+bestaudio/best"]
     last_error = ""
     for fmt in formatos:
         ydl_opts = {
@@ -158,15 +189,11 @@ def _download_url(url: str, session_id: str):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_name = info.get("title", f"video_{session_id}") + ".mp4"
-
             candidates = list(WORK_DIR.glob(f"video_{session_id}.*"))
             if candidates:
-                log.info(f"Download OK com formato: {fmt}")
                 return str(candidates[0]), video_name, None
-
         except Exception as e:
             last_error = str(e)
-            log.warning(f"Formato {fmt} falhou: {e}")
             continue
 
     return None, None, last_error
@@ -233,6 +260,22 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+
+async def cmd_status(update, ctx):
+    cookies_path = WORK_DIR / 'cookies.txt'
+    exists = cookies_path.exists()
+    size = cookies_path.stat().st_size if exists else 0
+    files = [f.name for f in WORK_DIR.iterdir()] if WORK_DIR.exists() else []
+    await update.message.reply_text(
+        f'WORK_DIR: {WORK_DIR}
+'
+        f'cookies.txt existe: {exists}
+'
+        f'Tamanho: {size} bytes
+'
+        f'Arquivos em /data: {files}'
+    )
+
 async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     csv_ensure()
     await update.message.reply_document(
@@ -264,15 +307,9 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = str(uuid.uuid4())[:8]
     await update.message.reply_text("📥 Baixando arquivo... aguarda.")
 
-    try:
-       tg_file = await ctx.bot.get_file(file_obj.file_id, read_timeout=300, write_timeout=300, connect_timeout=300)
-       video_path = str(WORK_DIR / f"video_{session_id}.mp4")
-       await update.message.reply_text("📥 Baixando... pode demorar alguns minutos para arquivos grandes.")
-       await tg_file.download_to_drive(video_path, read_timeout=600)
-    except Exception as e:
-       await update.message.reply_text(f"❌ Erro ao baixar arquivo:\n`{e}`", parse_mode="Markdown")
-       return
-
+    tg_file = await ctx.bot.get_file(file_obj.file_id)
+    video_path = str(WORK_DIR / f"video_{session_id}.mp4")
+    await tg_file.download_to_drive(video_path)
 
     frame_b64 = get_first_frame_b64(video_path)
     video_name = getattr(file_obj, "file_name", None) or f"video_{session_id}.mp4"
