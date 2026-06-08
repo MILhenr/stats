@@ -137,10 +137,10 @@ def _download_url(url: str, session_id: str):
 
     # Lista de formatos para tentar, do mais simples ao mais compatível
     formatos = [
-        "b[ext=mp4]/bv*[ext=mp4]+ba[ext=m4a]/b",
-        "best[ext=mp4]/best",
-        "bestvideo+bestaudio/best",
+        "best",
         "worst",
+        "bestvideo+bestaudio/best",
+        "bestvideo*+bestaudio/best",
     ]
 
     last_error = ""
