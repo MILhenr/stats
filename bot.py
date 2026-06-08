@@ -264,9 +264,15 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = str(uuid.uuid4())[:8]
     await update.message.reply_text("📥 Baixando arquivo... aguarda.")
 
-    tg_file = await ctx.bot.get_file(file_obj.file_id, read_timeout=300, write_timeout=300, connect_timeout=300)
-    video_path = str(WORK_DIR / f"video_{session_id}.mp4")
-    await tg_file.download_to_drive(video_path, read_timeout=600)
+    try:
+       tg_file = await ctx.bot.get_file(file_obj.file_id, read_timeout=300, write_timeout=300, connect_timeout=300)
+       video_path = str(WORK_DIR / f"video_{session_id}.mp4")
+       await update.message.reply_text("📥 Baixando... pode demorar alguns minutos para arquivos grandes.")
+       await tg_file.download_to_drive(video_path, read_timeout=600)
+    except Exception as e:
+       await update.message.reply_text(f"❌ Erro ao baixar arquivo:\n`{e}`", parse_mode="Markdown")
+       return
+
 
     frame_b64 = get_first_frame_b64(video_path)
     video_name = getattr(file_obj, "file_name", None) or f"video_{session_id}.mp4"
