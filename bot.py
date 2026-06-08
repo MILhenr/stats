@@ -294,7 +294,7 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def _download_url(url: str, session_id: str):
     out_path = str(WORK_DIR / f"video_{session_id}.mp4")
     ydl_opts = {
-        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best",
+        "format": "best[height<=720]/best",
         "outtmpl": str(WORK_DIR / f"video_{session_id}"),
         "merge_output_format": "mp4",
         "quiet": True,
