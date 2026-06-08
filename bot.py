@@ -152,8 +152,7 @@ def _download_url(url: str, session_id: str):
             "no_warnings": True,
             "noplaylist": True,
             "merge_output_format": "mp4",
-            # cookies do navegador ajudam com vídeos que precisam de login
-            # "cookiesfrombrowser": ("chrome",),
+            "cookiefile": str(WORK_DIR / "cookies.txt") if (WORK_DIR / "cookies.txt").exists() else None,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -240,6 +239,20 @@ async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         document=open(CSV_PATH, "rb"),
         filename="gols.csv",
         caption="📊 Planilha de gols"
+    )
+
+async def handle_cookies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Aceita cookies.txt enviado pelo Telegram e salva em /data."""
+    doc = update.message.document
+    if not doc or "cookies" not in doc.file_name.lower():
+        return
+    tg_file = await ctx.bot.get_file(doc.file_id)
+    cookies_path = WORK_DIR / "cookies.txt"
+    await tg_file.download_to_drive(str(cookies_path))
+    await update.message.reply_text(
+        "✅ *cookies.txt salvo!*\n"
+        "Agora manda o link do YouTube normalmente.",
+        parse_mode="Markdown"
     )
 
 async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -500,6 +513,7 @@ def main():
     app.add_handler(CommandHandler("csv", cmd_csv))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_cookies))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
     log.info("🤖 Bot iniciado!")
