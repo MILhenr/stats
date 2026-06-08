@@ -264,7 +264,7 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = str(uuid.uuid4())[:8]
     await update.message.reply_text("📥 Baixando arquivo... aguarda.")
 
-    tg_file = await ctx.bot.get_file(file_obj.file_id)
+    tg_file = await ctx.bot.get_file(file_obj.file_id, read_timeout=300, write_timeout=300, connect_timeout=300)
     video_path = str(WORK_DIR / f"video_{session_id}.mp4")
     await tg_file.download_to_drive(video_path)
 
