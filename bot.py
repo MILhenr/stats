@@ -262,19 +262,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update, ctx):
-    cookies_path = WORK_DIR / 'cookies.txt'
+    cookies_path = WORK_DIR / "cookies.txt"
     exists = cookies_path.exists()
     size = cookies_path.stat().st_size if exists else 0
     files = [f.name for f in WORK_DIR.iterdir()] if WORK_DIR.exists() else []
-    await update.message.reply_text(
-        f'WORK_DIR: {WORK_DIR}
-'
-        f'cookies.txt existe: {exists}
-'
-        f'Tamanho: {size} bytes
-'
-        f'Arquivos em /data: {files}'
-    )
+    parts = ["WORK_DIR: " + str(WORK_DIR), "cookies.txt: " + str(exists), "Tamanho: " + str(size) + " bytes", "Arquivos: " + str(files)]
+    await update.message.reply_text("\n".join(parts))
+
 
 async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     csv_ensure()
