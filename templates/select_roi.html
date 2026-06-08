@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScoutBot — Selecionar Área do Placar</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #080c0a;
+    --surface: #0f150d;
+    --card: #131a10;
+    --border: #1d2b18;
+    --green: #4eff8a;
+    --muted: #5a7052;
+    --text: #d4e8cc;
+    --red: #ff4d4d;
+    --yellow: #ffd84d;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px;
+    gap: 20px;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--green);
+    letter-spacing: -0.5px;
+  }
+
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-align: center;
+    max-width: 560px;
+    line-height: 1.6;
+  }
+
+  /* STATUS */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    width: 100%;
+    max-width: 960px;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot.loading { background: var(--yellow); animation: blink 1s infinite; }
+  .dot.ready   { background: var(--green); }
+  .dot.saved   { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* CANVAS WRAPPER */
+  .canvas-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 960px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: crosshair;
+    user-select: none;
+  }
+
+  #bgImg {
+    display: block;
+    width: 100%;
+    height: auto;
+    opacity: 0.9;
+    pointer-events: none;
+  }
+
+  #overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    opacity: 0.4;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .hint-icon { font-size: 3rem; }
+  .hint-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* CONTROLS */
+  .controls {
+    display: flex;
+    gap: 12px;
+    width: 100%;
+    max-width: 960px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.95rem;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s;
+  }
+  .btn-green {
+    background: var(--green);
+    color: #050c07;
+    flex: 1;
+  }
+  .btn-green:hover { filter: brightness(1.1); }
+  .btn-green:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .btn-outline {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .btn-outline:hover { border-color: var(--green); color: var(--green); }
+
+  /* ROI INFO */
+  .roi-info {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    padding: 8px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 100%;
+    max-width: 960px;
+    min-height: 32px;
+  }
+
+  /* SUCCESS */
+  .success-box {
+    display: none;
+    background: rgba(78,255,138,0.07);
+    border: 1px solid rgba(78,255,138,0.25);
+    border-radius: 10px;
+    padding: 20px 28px;
+    text-align: center;
+    width: 100%;
+    max-width: 960px;
+  }
+  .success-box h2 { color: var(--green); font-size: 1.2rem; margin-bottom: 8px; }
+  .success-box p {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .success-box.show { display: block; }
+</style>
+</head>
+<body>
+
+<h1>⚽ ScoutBot — Área do Placar</h1>
+<p class="subtitle">
+  Arraste sobre a imagem abaixo para marcar exatamente onde fica o placar no vídeo.
+  Depois clique em <strong>Confirmar</strong> e volte ao Telegram e mande <code>/pronto</code>.
+</p>
+
+<div class="status-bar">
+  <div class="dot loading" id="dot"></div>
+  <span id="statusText">Carregando frame do vídeo...</span>
+</div>
+
+<div class="canvas-wrap" id="wrap">
+  <img id="bgImg" src="" alt="frame do vídeo" style="display:none" />
+  <canvas id="overlay"></canvas>
+  <div class="hint" id="hint">
+    <div class="hint-icon">🎯</div>
+    <div class="hint-text">Aguardando frame do vídeo...</div>
+  </div>
+</div>
+
+<div class="roi-info" id="roiInfo">Nenhuma área selecionada ainda</div>
+
+<div class="controls">
+  <button class="btn btn-outline" onclick="clearSelection()">↺ Limpar</button>
+  <button class="btn btn-green" id="btnConfirm" disabled onclick="confirmRoi()">
+    ✓ Confirmar Área
+  </button>
+</div>
+
+<div class="success-box" id="successBox">
+  <h2>✅ Área confirmada!</h2>
+  <p>
+    Volte ao Telegram e envie <strong>/pronto</strong> para iniciar a análise.<br>
+    O bot vai detectar todas as mudanças de placar e te mandar os clipes.
+  </p>
+</div>
+
+<script>
+const canvas = document.getElementById('overlay');
+const ctx    = canvas.getContext('2d');
+const wrap   = document.getElementById('wrap');
+const bgImg  = document.getElementById('bgImg');
+
+let dragging = false, startX = 0, startY = 0;
+let sel = null; // {x, y, w, h} em pixels no canvas
+
+// ─── LOAD FRAME ──────────────────────────────────────────────────────────────
+async function loadFrame() {
+  try {
+    const r = await fetch('/api/frame/{{ session_id }}');
+    const d = await r.json();
+    if (d.ready && d.frame) {
+      bgImg.src = 'data:image/jpeg;base64,' + d.frame;
+      bgImg.style.display = 'block';
+      bgImg.onload = () => {
+        resizeCanvas();
+        document.getElementById('hint').style.opacity = '0.3';
+        document.getElementById('hint').querySelector('.hint-text').textContent =
+          'Arraste para marcar a área do placar';
+        setStatus('ready', 'Frame carregado. Arraste para selecionar a área do placar.');
+      };
+    } else {
+      setStatus('loading', 'Aguardando vídeo ser enviado no Telegram...');
+      setTimeout(loadFrame, 2000);
+    }
+  } catch {
+    setTimeout(loadFrame, 3000);
+  }
+}
+
+function resizeCanvas() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = bgImg.naturalHeight * wrap.clientWidth / bgImg.naturalWidth;
+  wrap.style.height = canvas.height + 'px';
+  drawSel();
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+// ─── DRAG SELECTION ───────────────────────────────────────────────────────────
+canvas.addEventListener('mousedown', e => {
+  dragging = true;
+  const r = canvas.getBoundingClientRect();
+  startX = e.clientX - r.left;
+  startY = e.clientY - r.top;
+  sel = null;
+  document.getElementById('hint').style.display = 'none';
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const r = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  const my = e.clientY - r.top;
+  sel = {
+    x: Math.min(startX, mx),
+    y: Math.min(startY, my),
+    w: Math.abs(mx - startX),
+    h: Math.abs(my - startY),
+  };
+  drawSel();
+  document.getElementById('roiInfo').textContent =
+    `Área: ${Math.round(sel.x)}, ${Math.round(sel.y)} → ${Math.round(sel.w)} × ${Math.round(sel.h)} px (tela)`;
+});
+
+canvas.addEventListener('mouseup', () => {
+  dragging = false;
+  if (sel && sel.w > 10 && sel.h > 10) {
+    document.getElementById('btnConfirm').disabled = false;
+  }
+});
+
+// touch support
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  canvas.dispatchEvent(new MouseEvent('mousedown', {clientX:t.clientX, clientY:t.clientY}));
+});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  canvas.dispatchEvent(new MouseEvent('mousemove', {clientX:t.clientX, clientY:t.clientY}));
+});
+canvas.addEventListener('touchend', e => {
+  canvas.dispatchEvent(new MouseEvent('mouseup'));
+});
+
+function drawSel() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!sel) return;
+  const {x,y,w,h} = sel;
+
+  // escurece o resto
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(x, y, w, h);
+
+  // borda verde
+  ctx.strokeStyle = '#4eff8a';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+
+  // cantos
+  const s = 12;
+  ctx.lineWidth = 3;
+  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy],i) => {
+    ctx.beginPath();
+    ctx.moveTo(cx+(i%2?-s:s), cy);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx, cy+(i<2?s:-s));
+    ctx.stroke();
+  });
+
+  // dimensões
+  ctx.fillStyle = '#4eff8a';
+  ctx.font = '11px JetBrains Mono, monospace';
+  ctx.fillText(`${Math.round(w)}×${Math.round(h)}`, x+4, y > 16 ? y-5 : y+h+14);
+}
+
+function clearSelection() {
+  sel = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  document.getElementById('btnConfirm').disabled = true;
+  document.getElementById('roiInfo').textContent = 'Nenhuma área selecionada ainda';
+  document.getElementById('hint').style.display = 'flex';
+  document.getElementById('hint').style.opacity = '0.3';
+}
+
+// ─── CONFIRM ──────────────────────────────────────────────────────────────────
+async function confirmRoi() {
+  if (!sel || sel.w < 5 || sel.h < 5) return;
+
+  // converter para proporção (0-1)
+  const payload = {
+    x: sel.x / canvas.width,
+    y: sel.y / canvas.height,
+    w: sel.w / canvas.width,
+    h: sel.h / canvas.height,
+  };
+
+  try {
+    const r = await fetch('/api/roi/{{ session_id }}', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      setStatus('saved', `✅ Área salva: ${d.roi[2]}×${d.roi[3]}px no vídeo real`);
+      document.getElementById('successBox').classList.add('show');
+      document.getElementById('btnConfirm').disabled = true;
+      document.getElementById('btnConfirm').textContent = '✓ Confirmado';
+    } else {
+      alert('Erro: ' + d.error);
+    }
+  } catch(e) {
+    alert('Erro de conexão: ' + e.message);
+  }
+}
+
+function setStatus(type, text) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + type;
+  document.getElementById('statusText').textContent = text;
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+loadFrame();
+</script>
+</body>
+</html>
