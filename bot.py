@@ -221,7 +221,7 @@ def _download_url(url: str, session_id: str):
         try:
             import gdown
             out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-            gdown.download(url, out_path, quiet=False)
+            gdown.download(url, out_path, quiet=False, fuzzy=True)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                 return out_path, f"video_{session_id}.mp4", None
             return None, None, "Arquivo vazio após download"
@@ -272,24 +272,27 @@ def roi_page(session_id):
 
 @flask_app.route("/api/frame/<session_id>")
 def api_frame(session_id):
-    s = session_load(session_id)
-    if not s:
-        return jsonify({"ready": False})
-    # se frames não estão no cache, regenera
-    if session_id not in _frames_cache:
-        video_path = s.get("video_path", "")
-        if video_path and os.path.exists(video_path):
-            frames = get_three_frames_b64(video_path)
-            _frames_cache[session_id] = frames
-            _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
-        else:
-            return jsonify({"ready": False})
-    frames = _frames_cache.get(session_id, [])
-    return jsonify({
-        "frames": frames,
-        "frame": _frame_b64_cache.get(session_id, ""),
-        "ready": bool(frames)
-    })
+    try:
+        s = session_load(session_id)
+        if not s:
+            return jsonify({"ready": False, "error": "sessao_nao_encontrada"})
+        if session_id not in _frames_cache:
+            video_path = s.get("video_path", "")
+            if video_path and os.path.exists(video_path):
+                frames = get_three_frames_b64(video_path)
+                _frames_cache[session_id] = frames
+                _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
+            else:
+                return jsonify({"ready": False, "error": "video_nao_encontrado"})
+        frames = _frames_cache.get(session_id, [])
+        return jsonify({
+            "frames": frames,
+            "frame": _frame_b64_cache.get(session_id, ""),
+            "ready": bool(frames)
+        })
+    except Exception as e:
+        log.error(f"api_frame error: {e}")
+        return jsonify({"ready": False, "error": str(e)})
 
 @flask_app.route("/api/roi/<session_id>", methods=["POST"])
 def api_roi(session_id):
