@@ -26,8 +26,8 @@ WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
 
 SECONDS_BEFORE = 15
-MIN_STATIC     = 1.0
-DIFF_THRESHOLD = 3
+MIN_STATIC     = 2.0
+DIFF_THRESHOLD = 25
 PADDING_AFTER  = 2
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
