@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime
 
 import numpy as np
+import imageio_ffmpeg
+os.environ["PATH"] += os.pathsep + os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 import yt_dlp
 from flask import Flask, render_template, request, jsonify, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
