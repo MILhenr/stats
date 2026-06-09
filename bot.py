@@ -367,30 +367,16 @@ async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Analisando... vou mandando os clipes em tempo real!")
     asyncio.get_event_loop().run_in_executor(None, lambda: asyncio.run(_processar(session_id, ctx)))
 
-async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
-    s = session_load(session_id)
-    if not s:
-        await ctx.bot.send_message(CHAT_ID, "❌ Sessão expirada.")
-        return
-    video_path = s["video_path"]
-    video_name = s["video_name"]
-    X, Y, W, H = s["roi"]
-
-    if not os.path.exists(video_path):
-        await ctx.bot.send_message(CHAT_ID, "❌ Vídeo não encontrado. Manda o link de novo.")
-        return
-
-    await ctx.bot.send_message(CHAT_ID, f"⚙️ Analisando *{video_name}*...", parse_mode="Markdown")
-
+def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
+    """Igual ao original — retorna lista de (start, end) de cada mudança."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     prev = None
     moving = False
-    start_move = 0
-    last_change_time = 0
+    start = 0
+    segments = []
     frame_id = 0
-    clip_count = 0
-    last_sent_time = -60
+    last_change_time = 0
 
     while True:
         ret, frame = cap.read()
@@ -407,41 +393,146 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
                 last_change_time = tempo
                 if not moving:
                     moving = True
-                    start_move = tempo
+                    start = tempo
             if moving and (tempo - last_change_time > MIN_STATIC):
-                if last_change_time - start_move > 0.5 and last_change_time - last_sent_time > 10:
-                    change_time = last_change_time
-                    last_sent_time = change_time
-                    clip_count += 1
-                    clip_id = f"{session_id}_{clip_count}"
-                    clip_path = str(WORK_DIR / f"clip_{clip_id}.mp4")
-                    if cortar_clip(video_path, change_time, clip_path):
-                        ts = ts_fmt(change_time)
-                        pending_clips[clip_id] = {"path": clip_path, "timestamp": ts, "video_origem": video_name}
-                        keyboard = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(f"⚽ Registrar gol #{clip_count} — {ts}", callback_data=f"gol:{clip_id}")
-                        ]])
-                        try:
-                            with open(clip_path, "rb") as f:
-                                await ctx.bot.send_video(
-                                    chat_id=CHAT_ID, video=f,
-                                    caption=f"⚽ Mudança #{clip_count} | {ts}\nClique para registrar.",
-                                    reply_markup=keyboard, supports_streaming=True,
-                                )
-                        except Exception as e:
-                            log.error(f"Erro ao enviar clipe: {e}")
+                end = last_change_time
+                if end - start > 2:
+                    segments.append((start, end))
                 moving = False
 
         prev = gray
         frame_id += 1
 
     cap.release()
+    return segments
 
-    if clip_count == 0:
-        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança detectada. Tenta área maior.")
-    else:
-        await ctx.bot.send_message(CHAT_ID, f"🏁 Concluído! {clip_count} clipe(s) enviado(s).")
+def cortar_segmento(video, start, end, output, padding=1.5):
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-ss", str(max(0, start - padding)),
+        "-i", video,
+        "-t", str((end - start) + padding * 2),
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+        "-c:a", "aac", output
+    ], capture_output=True)
+    return os.path.exists(output)
 
+def juntar_clips(clips, output):
+    if not clips:
+        return False
+    lista = str(WORK_DIR / "lista.txt")
+    with open(lista, "w") as f:
+        for c in clips:
+            f.write(f"file '{os.path.abspath(c)}'\n")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", lista, "-c", "copy", output
+    ], capture_output=True)
+    try: os.remove(lista)
+    except: pass
+    return os.path.exists(output)
+
+def comprimir_video(input_video, output):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v", "libx264", "-crf", "32", "-preset", "fast",
+        "-c:a", "aac", output
+    ], capture_output=True)
+    return os.path.exists(output)
+
+async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
+    s = session_load(session_id)
+    if not s:
+        await ctx.bot.send_message(CHAT_ID, "❌ Sessão expirada.")
+        return
+    video_path = s["video_path"]
+    video_name = s["video_name"]
+    X, Y, W, H = s["roi"]
+
+    if not os.path.exists(video_path):
+        await ctx.bot.send_message(CHAT_ID, "❌ Vídeo não encontrado. Manda o link de novo.")
+        return
+
+    await ctx.bot.send_message(CHAT_ID, f"⚙️ Detectando mudanças em *{video_name}*...", parse_mode="Markdown")
+
+    segments = detectar_segmentos(video_path, X, Y, W, H)
+
+    if not segments:
+        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança detectada. Tenta selecionar uma área maior.")
+        try: os.remove(video_path)
+        except: pass
+        session_delete(session_id)
+        return
+
+    await ctx.bot.send_message(CHAT_ID, f"✅ {len(segments)} mudança(s) detectada(s)! Cortando e enviando...")
+
+    clips = []
+    clip_ids = []
+
+    for j, (s_time, e_time) in enumerate(segments):
+        out = str(WORK_DIR / f"clip_{session_id}_{j}.mp4")
+        ok = cortar_segmento(video_path, s_time, e_time, out)
+        if ok:
+            clips.append(out)
+            clip_ids.append((j, s_time, e_time))
+
+    if not clips:
+        await ctx.bot.send_message(CHAT_ID, "❌ Erro ao cortar clipes.")
+        return
+
+    # Juntar todos num arquivo final
+    final = str(WORK_DIR / f"final_{session_id}.mp4")
+    final_small = str(WORK_DIR / f"final_small_{session_id}.mp4")
+
+    ok = juntar_clips(clips, final)
+    if not ok:
+        await ctx.bot.send_message(CHAT_ID, "❌ Erro ao juntar clipes.")
+        return
+
+    ok = comprimir_video(final, final_small)
+    if not ok:
+        final_small = final  # usa sem comprimir se falhar
+
+    # Manda como DOCUMENTO (igual ao original — sem limite de tamanho)
+    ts_inicio = ts_fmt(segments[0][0])
+    ts_fim = ts_fmt(segments[-1][1])
+    clip_id = f"{session_id}_final"
+    pending_clips[clip_id] = {
+        "path": final_small,
+        "timestamp": ts_inicio,
+        "video_origem": video_name,
+    }
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"⚽ Registrar gols", callback_data=f"gol:{clip_id}")
+    ]])
+
+    try:
+        with open(final_small, "rb") as f:
+            await ctx.bot.send_document(
+                chat_id=CHAT_ID,
+                document=f,
+                filename=f"gols_{video_name}",
+                caption=(
+                    f"⚽ *{len(segments)} mudança(s) de placar*\n"
+                    f"🕐 {ts_inicio} → {ts_fim}\n"
+                    f"Clique para registrar os gols."
+                ),
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        log.error(f"Erro ao enviar documento: {e}")
+        await ctx.bot.send_message(CHAT_ID, f"❌ Erro ao enviar: {e}")
+
+    # Limpar
+    for c in clips:
+        try: os.remove(c)
+        except: pass
+    try: os.remove(final)
+    except: pass
     try: os.remove(video_path)
     except: pass
     session_delete(session_id)
