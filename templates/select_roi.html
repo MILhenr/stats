@@ -238,28 +238,68 @@ const bgImg  = document.getElementById('bgImg');
 let dragging = false, startX = 0, startY = 0;
 let sel = null; // {x, y, w, h} em pixels no canvas
 
-// ─── LOAD FRAME ──────────────────────────────────────────────────────────────
+// ─── LOAD FRAMES ─────────────────────────────────────────────────────────────
+let allFrames = [];
+let activeFrameIdx = 0;
+
 async function loadFrame() {
   try {
     const r = await fetch('/api/frame/{{ session_id }}');
     const d = await r.json();
-    if (d.ready && d.frame) {
+    if (d.ready && d.frames && d.frames.length > 0) {
+      allFrames = d.frames;
+      renderFrameSelector();
+      loadFrameByIdx(0);
+    } else if (d.ready && d.frame) {
       bgImg.src = 'data:image/jpeg;base64,' + d.frame;
       bgImg.style.display = 'block';
-      bgImg.onload = () => {
-        resizeCanvas();
-        document.getElementById('hint').style.opacity = '0.3';
-        document.getElementById('hint').querySelector('.hint-text').textContent =
-          'Arraste para marcar a área do placar';
-        setStatus('ready', 'Frame carregado. Arraste para selecionar a área do placar.');
-      };
+      bgImg.onload = () => { resizeCanvas(); setStatus('ready', 'Frame carregado.'); };
     } else {
-      setStatus('loading', 'Aguardando vídeo ser enviado no Telegram...');
+      setStatus('loading', 'Aguardando vídeo...');
       setTimeout(loadFrame, 2000);
     }
   } catch {
     setTimeout(loadFrame, 3000);
   }
+}
+
+function renderFrameSelector() {
+  const existing = document.getElementById('frameTabs');
+  if (existing) existing.remove();
+  const tabs = document.createElement('div');
+  tabs.id = 'frameTabs';
+  tabs.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+  allFrames.forEach((f, i) => {
+    const btn = document.createElement('button');
+    btn.textContent = f.label;
+    btn.style.cssText = 'padding:8px 14px;border-radius:6px;font-family:JetBrains Mono,monospace;font-size:0.75rem;cursor:pointer;border:1px solid #1d2b18;background:' + (i===0?'#4eff8a':'#131a10') + ';color:' + (i===0?'#050c07':'#d4e8cc') + ';transition:all 0.15s;';
+    btn.onclick = () => loadFrameByIdx(i);
+    btn.id = 'frameTab_' + i;
+    tabs.appendChild(btn);
+  });
+  const wrap2 = document.getElementById('wrap');
+  wrap2.parentNode.insertBefore(tabs, wrap2);
+}
+
+function loadFrameByIdx(idx) {
+  activeFrameIdx = idx;
+  const f = allFrames[idx];
+  // update tab styles
+  allFrames.forEach((_, i) => {
+    const btn = document.getElementById('frameTab_' + i);
+    if (!btn) return;
+    btn.style.background = i === idx ? '#4eff8a' : '#131a10';
+    btn.style.color = i === idx ? '#050c07' : '#d4e8cc';
+  });
+  bgImg.src = 'data:image/jpeg;base64,' + f.b64;
+  bgImg.style.display = 'block';
+  bgImg.onload = () => {
+    resizeCanvas();
+    sel = null;
+    document.getElementById('hint').style.display = 'none';
+    document.getElementById('btnConfirm').disabled = true;
+    setStatus('ready', 'Frame ' + (idx+1) + ' de ' + allFrames.length + ' — ' + f.label + '. Arraste para marcar o placar.');
+  };
 }
 
 function resizeCanvas() {
