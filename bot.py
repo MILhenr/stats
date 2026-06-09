@@ -18,7 +18,7 @@ from telegram.ext import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL = "https://stats-production-a62b.up.railway.app"
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
@@ -221,7 +221,7 @@ def _download_url(url: str, session_id: str):
         try:
             import gdown
             out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-            gdown.download(url, out_path, quiet=False)
+            gdown.download(url, out_path, quiet=False, fuzzy=True)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                 return out_path, f"video_{session_id}.mp4", None
             return None, None, "Arquivo vazio após download"
@@ -266,7 +266,7 @@ def index():
 
 @flask_app.route("/roi/<session_id>")
 def roi_page(session_id):
-    if not session_load(session_id):
+    if session_id not in sessions:
         return "Sessão inválida ou expirada.", 404
     return render_template("select_roi.html", session_id=session_id)
 
@@ -432,31 +432,72 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     video_path = s["video_path"]
     video_name = s["video_name"]
     X, Y, W, H = s["roi"]
-    await ctx.bot.send_message(CHAT_ID, f"⚙️ Detectando mudanças em *{video_name}*...", parse_mode="Markdown")
-    changes = detectar_mudancas(video_path, X, Y, W, H)
-    if not changes:
-        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança detectada. Tenta selecionar uma área maior.")
-        return
-    await ctx.bot.send_message(CHAT_ID, f"✅ {len(changes)} mudança(s)! Cortando clipes...")
-    for i, change_time in enumerate(changes):
-        clip_id = f"{session_id}_{i}"
-        clip_path = str(WORK_DIR / f"clip_{clip_id}.mp4")
-        ok = cortar_clip(video_path, change_time, clip_path)
-        if not ok:
-            await ctx.bot.send_message(CHAT_ID, f"❌ Erro ao cortar clipe {i+1}")
-            continue
-        ts = ts_fmt(change_time)
-        pending_clips[clip_id] = {"path": clip_path, "timestamp": ts, "video_origem": video_name}
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"⚽ Registrar gol #{i+1} — {ts}", callback_data=f"gol:{clip_id}")
-        ]])
-        with open(clip_path, "rb") as f:
-            await ctx.bot.send_video(
-                chat_id=CHAT_ID, video=f,
-                caption=f"⚽ Mudança #{i+1} | {ts}\nClique abaixo para registrar.",
-                reply_markup=keyboard, supports_streaming=True,
-            )
-    await ctx.bot.send_message(CHAT_ID, f"🏁 Pronto! {len(changes)} clipe(s) enviado(s).", parse_mode="Markdown")
+
+    await ctx.bot.send_message(CHAT_ID, f"⚙️ Analisando *{video_name}*...\nVou mandando os clipes em tempo real!", parse_mode="Markdown")
+
+    # Analisa e manda em tempo real — não espera terminar
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    prev = None
+    moving = False
+    start_move = 0
+    last_change_time = 0
+    frame_id = 0
+    clip_count = 0
+    last_sent_time = -60  # evita mandar dois clipes muito próximos
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        crop = frame[Y:Y+H, X:X+W]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        tempo = frame_id / fps
+
+        if prev is not None:
+            score = np.mean(cv2.absdiff(prev, gray))
+            if score > DIFF_THRESHOLD:
+                last_change_time = tempo
+                if not moving:
+                    moving = True
+                    start_move = tempo
+            if moving and (tempo - last_change_time > MIN_STATIC):
+                if last_change_time - start_move > 0.5 and last_change_time - last_sent_time > 10:
+                    change_time = last_change_time
+                    last_sent_time = change_time
+                    clip_count += 1
+                    clip_id = f"{session_id}_{clip_count}"
+                    clip_path = str(WORK_DIR / f"clip_{clip_id}.mp4")
+                    ok = cortar_clip(video_path, change_time, clip_path)
+                    if ok:
+                        ts = ts_fmt(change_time)
+                        pending_clips[clip_id] = {"path": clip_path, "timestamp": ts, "video_origem": video_name}
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(f"⚽ Registrar gol #{clip_count} — {ts}", callback_data=f"gol:{clip_id}")
+                        ]])
+                        try:
+                            with open(clip_path, "rb") as f:
+                                await ctx.bot.send_video(
+                                    chat_id=CHAT_ID, video=f,
+                                    caption=f"⚽ Mudança #{clip_count} | {ts}\nClique para registrar.",
+                                    reply_markup=keyboard, supports_streaming=True,
+                                )
+                        except Exception as e:
+                            log.error(f"Erro ao enviar clipe: {e}")
+                moving = False
+
+        prev = gray
+        frame_id += 1
+
+    cap.release()
+
+    if clip_count == 0:
+        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança de placar detectada.\nTenta selecionar uma área maior.")
+    else:
+        await ctx.bot.send_message(CHAT_ID, f"🏁 Análise concluída! {clip_count} clipe(s) enviado(s).", parse_mode="Markdown")
+
     try: os.remove(video_path)
     except: pass
     session_delete(session_id)
