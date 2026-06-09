@@ -18,7 +18,7 @@ from telegram.ext import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
+PUBLIC_URL = os.environ.get("PUBLIC_URL") or "https://stats-production-a62b.up.railway.app"
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
