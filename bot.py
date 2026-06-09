@@ -194,7 +194,7 @@ def _download_url(url: str, session_id: str):
         try:
             import gdown
             out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-            gdown.download(url, out_path, quiet=False, fuzzy=True)
+            gdown.download(url, out_path, quiet=False)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                 return out_path, f"video_{session_id}.mp4", None
             return None, None, "Arquivo vazio após download"
