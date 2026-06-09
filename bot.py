@@ -18,7 +18,7 @@ from telegram.ext import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
+PUBLIC_URL = os.environ.get("PUBLIC_URL") or "https://stats-production-a62b.up.railway.app"
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
@@ -34,6 +34,8 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 log = logging.getLogger("scoutbot")
 
 pending_clips: dict[str, dict] = {}
+_frames_cache: dict[str, list] = {}
+_frame_b64_cache: dict[str, str] = {}
 
 # ─── SESSÕES EM DISCO ────────────────────────────────────────────────────────
 def session_path(session_id: str) -> Path:
@@ -41,27 +43,26 @@ def session_path(session_id: str) -> Path:
 
 def session_save(session_id: str, data: dict):
     import json
-    # não salva frame_b64 e frames no disco (muito grande), salva só metadados
     to_save = {k: v for k, v in data.items() if k not in ("frame_b64", "frames")}
     with open(session_path(session_id), "w") as f:
         json.dump(to_save, f)
 
-def session_load(session_id: str) -> dict:
+def session_load(session_id: str):
     import json
+    if not session_id:
+        return None
     p = session_path(session_id)
     if not p.exists():
         return None
-    with open(p) as f:
-        return json.load(f)
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except:
+        return None
 
 def session_delete(session_id: str):
-    p = session_path(session_id)
-    try: p.unlink()
+    try: session_path(session_id).unlink()
     except: pass
-
-# Cache em memória para frames (não persistem mas são recriados se necessário)
-_frames_cache: dict[str, list] = {}
-_frame_b64_cache: dict[str, str] = {}
 
 # ─── CSV ─────────────────────────────────────────────────────────────────────
 def csv_ensure():
@@ -85,36 +86,20 @@ def csv_save(row: dict):
         ])
 
 # ─── VÍDEO ───────────────────────────────────────────────────────────────────
-def get_first_frame_b64(video_path: str) -> str:
-    import base64
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        return ""
-    h, w = frame.shape[:2]
-    frame = cv2.resize(frame, (960, int(h * 960 / w)))
-    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    return base64.b64encode(buf).decode()
-
 def get_three_frames_b64(video_path: str) -> list:
-    """Retorna 3 frames: +20min inicio, meio, -20min final. Cada item: {b64, label, seconds}"""
     import base64
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
-
     t1 = 20 * 60
     t2 = duration / 2
     t3 = max(0, duration - 20 * 60)
-
     timestamps = [
         (t1, "🕐 +20min do início"),
-        (t2, f"🕑 Meio do vídeo ({int(t2//60)}min)"),
+        (t2, f"🕑 Meio ({int(t2//60)}min)"),
         (t3, f"🕒 -20min do final ({int(t3//60)}min)"),
     ]
-
     results = []
     for t, label in timestamps:
         cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
@@ -124,9 +109,7 @@ def get_three_frames_b64(video_path: str) -> list:
         h, w = frame.shape[:2]
         frame = cv2.resize(frame, (960, int(h * 960 / w)))
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        b64 = base64.b64encode(buf).decode()
-        results.append({"b64": b64, "label": label, "seconds": t})
-
+        results.append({"b64": base64.b64encode(buf).decode(), "label": label, "seconds": t})
     cap.release()
     return results
 
@@ -140,43 +123,6 @@ def get_frame_size(video_path: str):
 def ts_fmt(seconds: float) -> str:
     s = int(seconds)
     return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
-
-def detectar_mudancas(video_path: str, X, Y, W, H) -> list:
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    prev = None
-    moving = False
-    start_move = 0
-    last_change_time = 0
-    changes = []
-    frame_id = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        crop = frame[Y:Y+H, X:X+W]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        tempo = frame_id / fps
-
-        if prev is not None:
-            score = np.mean(cv2.absdiff(prev, gray))
-            if score > DIFF_THRESHOLD:
-                last_change_time = tempo
-                if not moving:
-                    moving = True
-                    start_move = tempo
-            if moving and (tempo - last_change_time > MIN_STATIC):
-                if last_change_time - start_move > 0.5:
-                    changes.append(last_change_time)
-                moving = False
-
-        prev = gray
-        frame_id += 1
-
-    cap.release()
-    return changes
 
 def cortar_clip(video_path: str, change_time: float, output: str) -> bool:
     start = max(0, change_time - SECONDS_BEFORE)
@@ -195,8 +141,7 @@ def _convert_dropbox_url(url):
     url = re.sub(r'[?&]dl=0', '?dl=1', url)
     if 'dl=1' not in url:
         url += '?dl=1' if '?' not in url else '&dl=1'
-    url = url.replace('www.dropbox.com', 'dl.dropboxusercontent.com')
-    return url
+    return url.replace('www.dropbox.com', 'dl.dropboxusercontent.com')
 
 def _download_direct(url, session_id):
     import requests as req
@@ -209,7 +154,7 @@ def _download_direct(url, session_id):
                     f.write(chunk)
         if out_path.exists() and out_path.stat().st_size > 1000:
             return str(out_path), out_path.name, None
-        return None, None, "Arquivo baixado está vazio"
+        return None, None, "Arquivo vazio"
     except Exception as e:
         return None, None, str(e)
 
@@ -232,9 +177,8 @@ def _download_url(url: str, session_id: str):
         log.info("Dropbox detectado")
         return _download_direct(_convert_dropbox_url(url), session_id)
 
-    formatos = ["best", "worst", "bestvideo+bestaudio/best"]
     last_error = ""
-    for fmt in formatos:
+    for fmt in ["best", "worst", "bestvideo+bestaudio/best"]:
         ydl_opts = {
             "format": fmt,
             "outtmpl": base_out + ".%(ext)s",
@@ -254,7 +198,6 @@ def _download_url(url: str, session_id: str):
         except Exception as e:
             last_error = str(e)
             continue
-
     return None, None, last_error
 
 # ─── FLASK ───────────────────────────────────────────────────────────────────
@@ -266,9 +209,17 @@ def index():
 
 @flask_app.route("/roi/<session_id>")
 def roi_page(session_id):
-    if session_id not in sessions:
-        return "Sessão inválida ou expirada.", 404
-    return render_template("select_roi.html", session_id=session_id)
+    try:
+        s = session_load(session_id)
+        if not s:
+            return "<h2>⚠️ Sessão expirada</h2><p>Mande o link do Drive novamente no Telegram.</p>", 404
+        video_path = s.get("video_path", "")
+        if not video_path or not os.path.exists(video_path):
+            return "<h2>⚠️ Vídeo não encontrado</h2><p>Mande o link do Drive novamente no Telegram.</p>", 404
+        return render_template("select_roi.html", session_id=session_id)
+    except Exception as e:
+        log.error(f"roi_page error: {e}")
+        return f"<h2>Erro</h2><p>{e}</p>", 500
 
 @flask_app.route("/api/frame/<session_id>")
 def api_frame(session_id):
@@ -285,31 +236,31 @@ def api_frame(session_id):
             else:
                 return jsonify({"ready": False, "error": "video_nao_encontrado"})
         frames = _frames_cache.get(session_id, [])
-        return jsonify({
-            "frames": frames,
-            "frame": _frame_b64_cache.get(session_id, ""),
-            "ready": bool(frames)
-        })
+        return jsonify({"frames": frames, "frame": _frame_b64_cache.get(session_id, ""), "ready": bool(frames)})
     except Exception as e:
         log.error(f"api_frame error: {e}")
         return jsonify({"ready": False, "error": str(e)})
 
 @flask_app.route("/api/roi/<session_id>", methods=["POST"])
 def api_roi(session_id):
-    s = session_load(session_id)
-    if not s:
-        return jsonify({"ok": False, "error": "Sessão inválida"})
-    data = request.json
-    vw, vh = get_frame_size(s["video_path"])
-    X = max(0, int(data["x"] * vw))
-    Y = max(0, int(data["y"] * vh))
-    W = max(1, min(int(data["w"] * vw), vw - X))
-    H = max(1, min(int(data["h"] * vh), vh - Y))
-    s["roi"] = [X, Y, W, H]
-    s["roi_ready"] = True
-    session_save(session_id, s)
-    log.info(f"ROI salvo sessão {session_id}: {X},{Y},{W},{H}")
-    return jsonify({"ok": True, "roi": [X, Y, W, H]})
+    try:
+        s = session_load(session_id)
+        if not s:
+            return jsonify({"ok": False, "error": "Sessão inválida"})
+        data = request.json
+        vw, vh = get_frame_size(s["video_path"])
+        X = max(0, int(data["x"] * vw))
+        Y = max(0, int(data["y"] * vh))
+        W = max(1, min(int(data["w"] * vw), vw - X))
+        H = max(1, min(int(data["h"] * vh), vh - Y))
+        s["roi"] = [X, Y, W, H]
+        s["roi_ready"] = True
+        session_save(session_id, s)
+        log.info(f"ROI salvo {session_id}: {X},{Y},{W},{H}")
+        return jsonify({"ok": True, "roi": [X, Y, W, H]})
+    except Exception as e:
+        log.error(f"api_roi error: {e}")
+        return jsonify({"ok": False, "error": str(e)})
 
 @flask_app.route("/api/csv")
 def download_csv():
@@ -325,12 +276,8 @@ URL_PATTERN = re.compile(r'https?://\S+')
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚽ *ScoutBot ativo!*\n\n"
-        "Cola um link aqui (YouTube, Google Drive ou Dropbox).\n\n"
-        "Comandos:\n"
-        "/csv — baixar planilha de gols\n"
-        "/status — checar servidor\n"
-        "/cancelar — cancelar registro",
+        "⚽ *ScoutBot ativo!*\n\nCola um link (Drive ou Dropbox).\n\n"
+        "/csv — planilha\n/status — servidor\n/cancelar — cancelar",
         parse_mode="Markdown"
     )
 
@@ -339,15 +286,15 @@ async def cmd_status(update, ctx):
     exists = cookies_path.exists()
     size = cookies_path.stat().st_size if exists else 0
     files = [f.name for f in WORK_DIR.iterdir()] if WORK_DIR.exists() else []
-    msg = "WORK_DIR: " + str(WORK_DIR) + "\ncookies.txt: " + str(exists) + "\nTamanho: " + str(size) + " bytes\nArquivos: " + str(files)
-    await update.message.reply_text(msg)
+    await update.message.reply_text(
+        "WORK_DIR: " + str(WORK_DIR) + "\ncookies.txt: " + str(exists) +
+        "\nTamanho: " + str(size) + " bytes\nArquivos: " + str(files)
+    )
 
 async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     csv_ensure()
     await update.message.reply_document(
-        document=open(CSV_PATH, "rb"),
-        filename="gols.csv",
-        caption="📊 Planilha de gols"
+        document=open(CSV_PATH, "rb"), filename="gols.csv", caption="📊 Planilha de gols"
     )
 
 async def handle_cookies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -355,8 +302,7 @@ async def handle_cookies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not doc or "cookies" not in doc.file_name.lower():
         return
     tg_file = await ctx.bot.get_file(doc.file_id)
-    cookies_path = WORK_DIR / "cookies.txt"
-    await tg_file.download_to_drive(str(cookies_path))
+    await tg_file.download_to_drive(str(WORK_DIR / "cookies.txt"))
     await update.message.reply_text("✅ *cookies.txt salvo!*", parse_mode="Markdown")
 
 async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -370,18 +316,17 @@ async def handle_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         video_path = str(WORK_DIR / f"video_{session_id}.mp4")
         await tg_file.download_to_drive(video_path, read_timeout=600)
     except Exception as e:
-        await update.message.reply_text(f"❌ Erro ao baixar arquivo:\n`{e}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Erro:\n`{e}`", parse_mode="Markdown")
         return
-    frame_b64 = get_first_frame_b64(video_path)
     video_name = getattr(file_obj, "file_name", None) or f"video_{session_id}.mp4"
-    sessions[session_id] = {
-        "video_path": video_path, "video_name": video_name,
-        "frame_b64": frame_b64, "roi": None, "roi_ready": False,
-    }
+    frames = get_three_frames_b64(video_path)
+    _frames_cache[session_id] = frames
+    _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
+    session_save(session_id, {"video_path": video_path, "video_name": video_name, "roi": None, "roi_ready": False})
     ctx.user_data["session_id"] = session_id
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
     await update.message.reply_text(
-        f"✅ Vídeo recebido!\n\n👇 Marque a área do placar:\n{roi_url}\n\nDepois mande /pronto",
+        f"✅ Vídeo recebido!\n\n👇 Marque o placar:\n{roi_url}\n\nDepois mande /pronto",
         disable_web_page_preview=True
     )
 
@@ -393,39 +338,34 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     url = match.group(0)
     session_id = str(uuid.uuid4())[:8]
     ctx.user_data["session_id"] = session_id
-    msg = await update.message.reply_text("⏳ Baixando vídeo no servidor Railway... pode levar alguns minutos.")
+    msg = await update.message.reply_text("⏳ Baixando vídeo no Railway... pode levar alguns minutos.")
     loop = asyncio.get_event_loop()
     video_path, video_name, error = await loop.run_in_executor(None, _download_url, url, session_id)
     if error or not video_path:
-        await msg.edit_text(f"❌ Erro ao baixar vídeo:\n`{error}`\n\nVerifica se o link é público.", parse_mode="Markdown")
+        await msg.edit_text(f"❌ Erro:\n`{error}`\n\nVerifica se o link é público.", parse_mode="Markdown")
         return
     frames = get_three_frames_b64(video_path)
     _frames_cache[session_id] = frames
     _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
-    session_save(session_id, {
-        "video_path": video_path, "video_name": video_name,
-        "roi": None, "roi_ready": False,
-    })
+    session_save(session_id, {"video_path": video_path, "video_name": video_name, "roi": None, "roi_ready": False})
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
     await msg.edit_text(
-        f"✅ *{video_name}*\n\n👇 Marque a área do placar:\n{roi_url}\n\nDepois mande /pronto",
+        f"✅ *{video_name}*\n\n👇 Marque o placar:\n{roi_url}\n\nDepois mande /pronto",
         parse_mode="Markdown", disable_web_page_preview=True
     )
 
 async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = ctx.user_data.get("session_id")
-    s = session_load(session_id) if session_id else None
-    if not session_id or not s:
-        await update.message.reply_text("❌ Nenhum vídeo em processamento. Manda um link primeiro.")
+    s = session_load(session_id)
+    if not s:
+        await update.message.reply_text("❌ Nenhum vídeo. Manda um link primeiro.")
         return
     if not s.get("roi_ready"):
         roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
         await update.message.reply_text(f"⚠️ Área não selecionada!\n\nAcesse: {roi_url}")
         return
-    await update.message.reply_text("🔍 Analisando vídeo... pode demorar alguns minutos ☕")
-    asyncio.get_event_loop().run_in_executor(
-        None, lambda: asyncio.run(_processar(session_id, ctx))
-    )
+    await update.message.reply_text("🔍 Analisando... vou mandando os clipes em tempo real!")
+    asyncio.get_event_loop().run_in_executor(None, lambda: asyncio.run(_processar(session_id, ctx)))
 
 async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     s = session_load(session_id)
@@ -436,9 +376,12 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     video_name = s["video_name"]
     X, Y, W, H = s["roi"]
 
-    await ctx.bot.send_message(CHAT_ID, f"⚙️ Analisando *{video_name}*...\nVou mandando os clipes em tempo real!", parse_mode="Markdown")
+    if not os.path.exists(video_path):
+        await ctx.bot.send_message(CHAT_ID, "❌ Vídeo não encontrado. Manda o link de novo.")
+        return
 
-    # Analisa e manda em tempo real — não espera terminar
+    await ctx.bot.send_message(CHAT_ID, f"⚙️ Analisando *{video_name}*...", parse_mode="Markdown")
+
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     prev = None
@@ -447,13 +390,12 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     last_change_time = 0
     frame_id = 0
     clip_count = 0
-    last_sent_time = -60  # evita mandar dois clipes muito próximos
+    last_sent_time = -60
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
         crop = frame[Y:Y+H, X:X+W]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -473,8 +415,7 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
                     clip_count += 1
                     clip_id = f"{session_id}_{clip_count}"
                     clip_path = str(WORK_DIR / f"clip_{clip_id}.mp4")
-                    ok = cortar_clip(video_path, change_time, clip_path)
-                    if ok:
+                    if cortar_clip(video_path, change_time, clip_path):
                         ts = ts_fmt(change_time)
                         pending_clips[clip_id] = {"path": clip_path, "timestamp": ts, "video_origem": video_name}
                         keyboard = InlineKeyboardMarkup([[
@@ -497,9 +438,9 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     cap.release()
 
     if clip_count == 0:
-        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança de placar detectada.\nTenta selecionar uma área maior.")
+        await ctx.bot.send_message(CHAT_ID, "⚠️ Nenhuma mudança detectada. Tenta área maior.")
     else:
-        await ctx.bot.send_message(CHAT_ID, f"🏁 Análise concluída! {clip_count} clipe(s) enviado(s).", parse_mode="Markdown")
+        await ctx.bot.send_message(CHAT_ID, f"🏁 Concluído! {clip_count} clipe(s) enviado(s).")
 
     try: os.remove(video_path)
     except: pass
@@ -566,10 +507,8 @@ async def _salvar(update, ctx, num_assist, nome_assist):
         del pending_clips[clip_id]
     assist_str = f"\n🅰️ #{num_assist} {nome_assist}" if nome_assist else ""
     await update.message.reply_text(
-        f"✅ *Gol salvo!*\n"
-        f"⚽ #{ctx.user_data.get('num_gol','')} {ctx.user_data.get('jogador_gol','')}{assist_str}\n"
-        f"🕐 {ctx.user_data.get('timestamp','')}\n\n"
-        f"_Use /csv para baixar a planilha._",
+        f"✅ *Gol salvo!*\n⚽ #{ctx.user_data.get('num_gol','')} {ctx.user_data.get('jogador_gol','')}{assist_str}\n"
+        f"🕐 {ctx.user_data.get('timestamp','')}\n\n_Use /csv para baixar._",
         parse_mode="Markdown"
     )
 
@@ -581,7 +520,7 @@ async def cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     csv_ensure()
     threading.Thread(target=run_flask, daemon=True).start()
-    log.info(f"🌐 Flask na porta {PORT} | URL: {PUBLIC_URL}")
+    log.info(f"🌐 Flask porta {PORT} | {PUBLIC_URL}")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_registrar, pattern=r"^gol:")],
