@@ -18,7 +18,7 @@ from telegram.ext import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL = os.environ.get("PUBLIC_URL") or "https://stats-production-a62b.up.railway.app"
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
@@ -33,8 +33,35 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s — %(message)s", level=logging.INFO)
 log = logging.getLogger("scoutbot")
 
-sessions: dict[str, dict] = {}
 pending_clips: dict[str, dict] = {}
+
+# ─── SESSÕES EM DISCO ────────────────────────────────────────────────────────
+def session_path(session_id: str) -> Path:
+    return WORK_DIR / f"session_{session_id}.json"
+
+def session_save(session_id: str, data: dict):
+    import json
+    # não salva frame_b64 e frames no disco (muito grande), salva só metadados
+    to_save = {k: v for k, v in data.items() if k not in ("frame_b64", "frames")}
+    with open(session_path(session_id), "w") as f:
+        json.dump(to_save, f)
+
+def session_load(session_id: str) -> dict:
+    import json
+    p = session_path(session_id)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+def session_delete(session_id: str):
+    p = session_path(session_id)
+    try: p.unlink()
+    except: pass
+
+# Cache em memória para frames (não persistem mas são recriados se necessário)
+_frames_cache: dict[str, list] = {}
+_frame_b64_cache: dict[str, str] = {}
 
 # ─── CSV ─────────────────────────────────────────────────────────────────────
 def csv_ensure():
@@ -194,7 +221,7 @@ def _download_url(url: str, session_id: str):
         try:
             import gdown
             out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-            gdown.download(url, out_path, quiet=False)
+            gdown.download(url, out_path, quiet=False, fuzzy=True)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                 return out_path, f"video_{session_id}.mp4", None
             return None, None, "Arquivo vazio após download"
@@ -245,19 +272,28 @@ def roi_page(session_id):
 
 @flask_app.route("/api/frame/<session_id>")
 def api_frame(session_id):
-    s = sessions.get(session_id)
+    s = session_load(session_id)
     if not s:
         return jsonify({"ready": False})
-    frames = s.get("frames", [])
+    # se frames não estão no cache, regenera
+    if session_id not in _frames_cache:
+        video_path = s.get("video_path", "")
+        if video_path and os.path.exists(video_path):
+            frames = get_three_frames_b64(video_path)
+            _frames_cache[session_id] = frames
+            _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
+        else:
+            return jsonify({"ready": False})
+    frames = _frames_cache.get(session_id, [])
     return jsonify({
         "frames": frames,
-        "frame": s.get("frame_b64", ""),
-        "ready": bool(s.get("frame_b64"))
+        "frame": _frame_b64_cache.get(session_id, ""),
+        "ready": bool(frames)
     })
 
 @flask_app.route("/api/roi/<session_id>", methods=["POST"])
 def api_roi(session_id):
-    s = sessions.get(session_id)
+    s = session_load(session_id)
     if not s:
         return jsonify({"ok": False, "error": "Sessão inválida"})
     data = request.json
@@ -266,8 +302,9 @@ def api_roi(session_id):
     Y = max(0, int(data["y"] * vh))
     W = max(1, min(int(data["w"] * vw), vw - X))
     H = max(1, min(int(data["h"] * vh), vh - Y))
-    s["roi"] = (X, Y, W, H)
+    s["roi"] = [X, Y, W, H]
     s["roi_ready"] = True
+    session_save(session_id, s)
     log.info(f"ROI salvo sessão {session_id}: {X},{Y},{W},{H}")
     return jsonify({"ok": True, "roi": [X, Y, W, H]})
 
@@ -360,10 +397,12 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Erro ao baixar vídeo:\n`{error}`\n\nVerifica se o link é público.", parse_mode="Markdown")
         return
     frames = get_three_frames_b64(video_path)
-    sessions[session_id] = {
+    _frames_cache[session_id] = frames
+    _frame_b64_cache[session_id] = frames[0]["b64"] if frames else ""
+    session_save(session_id, {
         "video_path": video_path, "video_name": video_name,
-        "frames": frames, "frame_b64": frames[0]["b64"] if frames else "", "roi": None, "roi_ready": False,
-    }
+        "roi": None, "roi_ready": False,
+    })
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
     await msg.edit_text(
         f"✅ *{video_name}*\n\n👇 Marque a área do placar:\n{roi_url}\n\nDepois mande /pronto",
@@ -372,10 +411,10 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session_id = ctx.user_data.get("session_id")
-    if not session_id or session_id not in sessions:
+    s = session_load(session_id) if session_id else None
+    if not session_id or not s:
         await update.message.reply_text("❌ Nenhum vídeo em processamento. Manda um link primeiro.")
         return
-    s = sessions[session_id]
     if not s.get("roi_ready"):
         roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
         await update.message.reply_text(f"⚠️ Área não selecionada!\n\nAcesse: {roi_url}")
@@ -386,7 +425,10 @@ async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
-    s = sessions[session_id]
+    s = session_load(session_id)
+    if not s:
+        await ctx.bot.send_message(CHAT_ID, "❌ Sessão expirada.")
+        return
     video_path = s["video_path"]
     video_name = s["video_name"]
     X, Y, W, H = s["roi"]
@@ -417,7 +459,9 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     await ctx.bot.send_message(CHAT_ID, f"🏁 Pronto! {len(changes)} clipe(s) enviado(s).", parse_mode="Markdown")
     try: os.remove(video_path)
     except: pass
-    sessions.pop(session_id, None)
+    session_delete(session_id)
+    _frames_cache.pop(session_id, None)
+    _frame_b64_cache.pop(session_id, None)
 
 # ─── REGISTRO DE GOL ─────────────────────────────────────────────────────────
 async def cb_registrar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
