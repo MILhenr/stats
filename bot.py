@@ -166,8 +166,17 @@ def _download_url(url: str, session_id: str):
     base_out = str(WORK_DIR / f"video_{session_id}")
 
     if 'drive.google.com' in url:
-        log.info("Google Drive detectado")
-        return _download_direct(_convert_drive_url(url), session_id)
+    log.info("Google Drive detectado")
+    try:
+        import gdown
+        out_path = str(WORK_DIR / f"video_{session_id}.mp4")
+        gdown.download(url, out_path, quiet=False, fuzzy=True)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+            return out_path, f"video_{session_id}.mp4", None
+        return None, None, "Arquivo vazio após download"
+    except Exception as e:
+        return None, None, str(e)
+
 
     if 'dropbox.com' in url or 'dropboxusercontent.com' in url:
         log.info("Dropbox detectado")
