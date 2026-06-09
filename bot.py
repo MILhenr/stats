@@ -8,7 +8,7 @@ from datetime import datetime
 
 import numpy as np
 import imageio_ffmpeg
-os.environ["PATH"] += os.pathsep + os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 import yt_dlp
 from flask import Flask, render_template, request, jsonify, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -27,13 +27,14 @@ CSV_PATH   = WORK_DIR / "gols.csv"
 
 SECONDS_BEFORE = 15
 MIN_STATIC     = 2.0
-DIFF_THRESHOLD = 25
+DIFF_THRESHOLD = 45
 PADDING_AFTER  = 2
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s — %(message)s", level=logging.INFO)
 log = logging.getLogger("scoutbot")
+log.info(f"FFMPEG path: {FFMPEG}")
 
 pending_clips: dict[str, dict] = {}
 _frames_cache: dict[str, list] = {}
@@ -126,19 +127,6 @@ def ts_fmt(seconds: float) -> str:
     s = int(seconds)
     return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
 
-def cortar_clip(video_path: str, change_time: float, output: str) -> bool:
-    start = max(0, change_time - SECONDS_BEFORE)
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-ss", str(start),
-        "-i", video_path,
-        "-t", str(SECONDS_BEFORE + PADDING_AFTER),
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "28",
-        "-c:a", "aac", output
-    ], capture_output=True)
-    return os.path.exists(output)
-
 def _convert_dropbox_url(url):
     url = re.sub(r'[?&]dl=0', '?dl=1', url)
     if 'dl=1' not in url:
@@ -201,6 +189,81 @@ def _download_url(url: str, session_id: str):
             last_error = str(e)
             continue
     return None, None, last_error
+
+# ─── FFMPEG FUNCTIONS ────────────────────────────────────────────────────────
+def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    prev = None
+    moving = False
+    start = 0
+    segments = []
+    frame_id = 0
+    last_change_time = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        crop = frame[Y:Y+H, X:X+W]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        tempo = frame_id / fps
+
+        if prev is not None:
+            score = np.mean(cv2.absdiff(prev, gray))
+            if score > DIFF_THRESHOLD:
+                last_change_time = tempo
+                if not moving:
+                    moving = True
+                    start = tempo
+            if moving and (tempo - last_change_time > MIN_STATIC):
+                end = last_change_time
+                if end - start > 2:
+                    segments.append((start, end))
+                moving = False
+
+        prev = gray
+        frame_id += 1
+
+    cap.release()
+    return segments
+
+def cortar_segmento(video, start, end, output, padding=1.5):
+    subprocess.run([
+        FFMPEG, "-y",
+        "-ss", str(max(0, start - padding)),
+        "-i", video,
+        "-t", str((end - start) + padding * 2),
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+        "-c:a", "aac", output
+    ], capture_output=True)
+    return os.path.exists(output)
+
+def juntar_clips(clips, output):
+    if not clips:
+        return False
+    lista = str(WORK_DIR / "lista.txt")
+    with open(lista, "w") as f:
+        for c in clips:
+            f.write(f"file '{os.path.abspath(c)}'\n")
+    subprocess.run([
+        FFMPEG, "-y", "-f", "concat", "-safe", "0",
+        "-i", lista, "-c", "copy", output
+    ], capture_output=True)
+    try: os.remove(lista)
+    except: pass
+    return os.path.exists(output)
+
+def comprimir_video(input_video, output):
+    subprocess.run([
+        FFMPEG, "-y", "-i", input_video,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v", "libx264", "-crf", "32", "-preset", "fast",
+        "-c:a", "aac", output
+    ], capture_output=True)
+    return os.path.exists(output)
 
 # ─── FLASK ───────────────────────────────────────────────────────────────────
 flask_app = Flask(__name__, template_folder="templates")
@@ -290,7 +353,8 @@ async def cmd_status(update, ctx):
     files = [f.name for f in WORK_DIR.iterdir()] if WORK_DIR.exists() else []
     await update.message.reply_text(
         "WORK_DIR: " + str(WORK_DIR) + "\ncookies.txt: " + str(exists) +
-        "\nTamanho: " + str(size) + " bytes\nArquivos: " + str(files)
+        "\nTamanho: " + str(size) + " bytes\nArquivos: " + str(files) +
+        "\nFFMPEG: " + FFMPEG
     )
 
 async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -366,83 +430,8 @@ async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
         await update.message.reply_text(f"⚠️ Área não selecionada!\n\nAcesse: {roi_url}")
         return
-    await update.message.reply_text("🔍 Analisando... vou mandando os clipes em tempo real!")
+    await update.message.reply_text("🔍 Analisando... aguarda os clipes!")
     asyncio.ensure_future(_processar(session_id, ctx))
-
-def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
-    """Igual ao original — retorna lista de (start, end) de cada mudança."""
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    prev = None
-    moving = False
-    start = 0
-    segments = []
-    frame_id = 0
-    last_change_time = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        crop = frame[Y:Y+H, X:X+W]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        tempo = frame_id / fps
-
-        if prev is not None:
-            score = np.mean(cv2.absdiff(prev, gray))
-            if score > DIFF_THRESHOLD:
-                last_change_time = tempo
-                if not moving:
-                    moving = True
-                    start = tempo
-            if moving and (tempo - last_change_time > MIN_STATIC):
-                end = last_change_time
-                if end - start > 2:
-                    segments.append((start, end))
-                moving = False
-
-        prev = gray
-        frame_id += 1
-
-    cap.release()
-    return segments
-
-def cortar_segmento(video, start, end, output, padding=1.5):
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-ss", str(max(0, start - padding)),
-        "-i", video,
-        "-t", str((end - start) + padding * 2),
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "28",
-        "-c:a", "aac", output
-    ], capture_output=True)
-    return os.path.exists(output)
-
-def juntar_clips(clips, output):
-    if not clips:
-        return False
-    lista = str(WORK_DIR / "lista.txt")
-    with open(lista, "w") as f:
-        for c in clips:
-            f.write(f"file '{os.path.abspath(c)}'\n")
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", lista, "-c", "copy", output
-    ], capture_output=True)
-    try: os.remove(lista)
-    except: pass
-    return os.path.exists(output)
-
-def comprimir_video(input_video, output):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
-        "-c:v", "libx264", "-crf", "32", "-preset", "fast",
-        "-c:a", "aac", output
-    ], capture_output=True)
-    return os.path.exists(output)
 
 async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     s = session_load(session_id)
@@ -471,20 +460,15 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
     await ctx.bot.send_message(CHAT_ID, f"✅ {len(segments)} mudança(s) detectada(s)! Cortando e enviando...")
 
     clips = []
-    clip_ids = []
-
     for j, (s_time, e_time) in enumerate(segments):
         out = str(WORK_DIR / f"clip_{session_id}_{j}.mp4")
-        ok = cortar_segmento(video_path, s_time, e_time, out)
-        if ok:
+        if cortar_segmento(video_path, s_time, e_time, out):
             clips.append(out)
-            clip_ids.append((j, s_time, e_time))
 
     if not clips:
         await ctx.bot.send_message(CHAT_ID, "❌ Erro ao cortar clipes.")
         return
 
-    # Juntar todos num arquivo final
     final = str(WORK_DIR / f"final_{session_id}.mp4")
     final_small = str(WORK_DIR / f"final_small_{session_id}.mp4")
 
@@ -495,20 +479,15 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
 
     ok = comprimir_video(final, final_small)
     if not ok:
-        final_small = final  # usa sem comprimir se falhar
+        final_small = final
 
-    # Manda como DOCUMENTO (igual ao original — sem limite de tamanho)
     ts_inicio = ts_fmt(segments[0][0])
     ts_fim = ts_fmt(segments[-1][1])
     clip_id = f"{session_id}_final"
-    pending_clips[clip_id] = {
-        "path": final_small,
-        "timestamp": ts_inicio,
-        "video_origem": video_name,
-    }
+    pending_clips[clip_id] = {"path": final_small, "timestamp": ts_inicio, "video_origem": video_name}
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"⚽ Registrar gols", callback_data=f"gol:{clip_id}")
+        InlineKeyboardButton("⚽ Registrar gols", callback_data=f"gol:{clip_id}")
     ]])
 
     try:
@@ -529,7 +508,6 @@ async def _processar(session_id: str, ctx: ContextTypes.DEFAULT_TYPE):
         log.error(f"Erro ao enviar documento: {e}")
         await ctx.bot.send_message(CHAT_ID, f"❌ Erro ao enviar: {e}")
 
-    # Limpar
     for c in clips:
         try: os.remove(c)
         except: pass
