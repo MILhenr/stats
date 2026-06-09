@@ -18,7 +18,7 @@ from telegram.ext import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://stats-production-a62b.up.railway.app")
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:5055")
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
@@ -69,6 +69,39 @@ def get_first_frame_b64(video_path: str) -> str:
     frame = cv2.resize(frame, (960, int(h * 960 / w)))
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return base64.b64encode(buf).decode()
+
+def get_three_frames_b64(video_path: str) -> list:
+    """Retorna 3 frames: +20min inicio, meio, -20min final. Cada item: {b64, label, seconds}"""
+    import base64
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps
+
+    t1 = 20 * 60
+    t2 = duration / 2
+    t3 = max(0, duration - 20 * 60)
+
+    timestamps = [
+        (t1, "🕐 +20min do início"),
+        (t2, f"🕑 Meio do vídeo ({int(t2//60)}min)"),
+        (t3, f"🕒 -20min do final ({int(t3//60)}min)"),
+    ]
+
+    results = []
+    for t, label in timestamps:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        h, w = frame.shape[:2]
+        frame = cv2.resize(frame, (960, int(h * 960 / w)))
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        b64 = base64.b64encode(buf).decode()
+        results.append({"b64": b64, "label": label, "seconds": t})
+
+    cap.release()
+    return results
 
 def get_frame_size(video_path: str):
     cap = cv2.VideoCapture(video_path)
@@ -161,7 +194,7 @@ def _download_url(url: str, session_id: str):
         try:
             import gdown
             out_path = str(WORK_DIR / f"video_{session_id}.mp4")
-            gdown.download(url, out_path, quiet=False)
+            gdown.download(url, out_path, quiet=False, fuzzy=True)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                 return out_path, f"video_{session_id}.mp4", None
             return None, None, "Arquivo vazio após download"
@@ -215,7 +248,12 @@ def api_frame(session_id):
     s = sessions.get(session_id)
     if not s:
         return jsonify({"ready": False})
-    return jsonify({"frame": s.get("frame_b64", ""), "ready": bool(s.get("frame_b64"))})
+    frames = s.get("frames", [])
+    return jsonify({
+        "frames": frames,
+        "frame": s.get("frame_b64", ""),
+        "ready": bool(s.get("frame_b64"))
+    })
 
 @flask_app.route("/api/roi/<session_id>", methods=["POST"])
 def api_roi(session_id):
@@ -321,10 +359,10 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if error or not video_path:
         await msg.edit_text(f"❌ Erro ao baixar vídeo:\n`{error}`\n\nVerifica se o link é público.", parse_mode="Markdown")
         return
-    frame_b64 = get_first_frame_b64(video_path)
+    frames = get_three_frames_b64(video_path)
     sessions[session_id] = {
         "video_path": video_path, "video_name": video_name,
-        "frame_b64": frame_b64, "roi": None, "roi_ready": False,
+        "frames": frames, "frame_b64": frames[0]["b64"] if frames else "", "roi": None, "roi_ready": False,
     }
     roi_url = f"{PUBLIC_URL.rstrip('/')}/roi/{session_id}"
     await msg.edit_text(
