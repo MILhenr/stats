@@ -266,7 +266,7 @@ def index():
 
 @flask_app.route("/roi/<session_id>")
 def roi_page(session_id):
-    if session_id not in sessions:
+    if not session_load(session_id):
         return "Sessão inválida ou expirada.", 404
     return render_template("select_roi.html", session_id=session_id)
 
