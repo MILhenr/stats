@@ -365,7 +365,7 @@ async def cmd_pronto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Área não selecionada!\n\nAcesse: {roi_url}")
         return
     await update.message.reply_text("🔍 Analisando... vou mandando os clipes em tempo real!")
-    asyncio.get_event_loop().run_in_executor(None, lambda: asyncio.run(_processar(session_id, ctx)))
+    asyncio.ensure_future(_processar(session_id, ctx))
 
 def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
     """Igual ao original — retorna lista de (start, end) de cada mudança."""
