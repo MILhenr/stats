@@ -1,6 +1,9 @@
 [phases.setup]
 nixPkgs = ["python311", "ffmpeg", "libGL", "libglib"]
 
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
+
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
