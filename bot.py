@@ -69,25 +69,218 @@ def session_delete(session_id: str):
     try: session_path(session_id).unlink()
     except: pass
 
-# ─── CSV ─────────────────────────────────────────────────────────────────────
+# ─── PLANILHA EXCEL ──────────────────────────────────────────────────────────
+XLSX_PATH = WORK_DIR / "scoutbot_dados.xlsx"
+
+def xlsx_ensure():
+    """Cria o Excel com abas formatadas se não existir."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        if XLSX_PATH.exists():
+            return
+
+        wb = Workbook()
+
+        # ── ABA GOLS ──────────────────────────────────────────────────────────
+        ws = wb.active
+        ws.title = "Gols"
+
+        headers = ["Data", "Hora", "Competição", "Time Mandante", "Time Visitante",
+                   "Time do Gol", "Timestamp Vídeo", "Nº Goleador", "Goleador",
+                   "Nº Assistência", "Assistência", "Vídeo"]
+
+        header_fill = PatternFill("solid", start_color="1F4E79")
+        header_font = Font(bold=True, color="FFFFFF", name="Arial", size=11)
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin = Side(border_style="thin", color="CCCCCC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            cell.border = border
+
+        ws.row_dimensions[1].height = 30
+        col_widths = [12, 8, 14, 18, 18, 14, 14, 10, 20, 12, 20, 20]
+        for i, w in enumerate(col_widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+        ws.freeze_panes = "A2"
+
+        # ── ABA RESUMO JOGADORES ──────────────────────────────────────────────
+        ws2 = wb.create_sheet("Resumo por Jogador")
+        h2 = ["Jogador", "Time", "Competição", "Gols", "Assistências", "Jogos"]
+        for col, h in enumerate(h2, 1):
+            cell = ws2.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = PatternFill("solid", start_color="1A5276")
+            cell.alignment = header_align
+            cell.border = border
+        ws2.row_dimensions[1].height = 30
+        for i, w in enumerate([22, 18, 14, 8, 12, 8], 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
+        ws2.freeze_panes = "A2"
+
+        # ── ABA RESUMO TIMES ──────────────────────────────────────────────────
+        ws3 = wb.create_sheet("Resumo por Time")
+        h3 = ["Time", "Competição", "Jogos", "Gols Marcados", "Gols Sofridos"]
+        for col, h in enumerate(h3, 1):
+            cell = ws3.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = PatternFill("solid", start_color="145A32")
+            cell.alignment = header_align
+            cell.border = border
+        ws3.row_dimensions[1].height = 30
+        for i, w in enumerate([22, 14, 8, 14, 14], 1):
+            ws3.column_dimensions[get_column_letter(i)].width = w
+        ws3.freeze_panes = "A2"
+
+        wb.save(str(XLSX_PATH))
+        log.info("✅ Planilha Excel criada")
+    except Exception as e:
+        log.error(f"xlsx_ensure error: {e}")
+
+def xlsx_save(row: dict):
+    """Adiciona uma linha na aba Gols e atualiza resumos."""
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.styles import Alignment, Border, Side, PatternFill, Font
+        from openpyxl.utils import get_column_letter
+
+        xlsx_ensure()
+        wb = load_workbook(str(XLSX_PATH))
+        ws = wb["Gols"]
+
+        thin = Side(border_style="thin", color="CCCCCC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        even_fill = PatternFill("solid", start_color="EBF5FB")
+
+        next_row = ws.max_row + 1
+        values = [
+            row.get("data", ""), row.get("hora", ""),
+            row.get("competicao", ""), row.get("time_mand", ""),
+            row.get("time_visit", ""), row.get("time_gol", ""),
+            row.get("timestamp_video", ""), row.get("num_gol", ""),
+            row.get("jogador_gol", ""), row.get("num_assist", ""),
+            row.get("jogador_assist", ""), row.get("video_origem", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=next_row, column=col, value=val)
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            if next_row % 2 == 0:
+                cell.fill = even_fill
+
+        # Atualiza aba Resumo por Jogador
+        _atualizar_resumo_jogador(wb, row)
+        _atualizar_resumo_time(wb, row)
+
+        wb.save(str(XLSX_PATH))
+    except Exception as e:
+        log.error(f"xlsx_save error: {e}")
+
+def _atualizar_resumo_jogador(wb, row):
+    """Atualiza ou cria linha do jogador no resumo."""
+    from openpyxl.styles import Alignment, Border, Side
+    ws = wb["Resumo por Jogador"]
+    thin = Side(border_style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    jogador = row.get("jogador_gol", "")
+    time_gol = row.get("time_gol", "")
+    comp = row.get("competicao", "")
+    assist = row.get("jogador_assist", "")
+
+    # Busca ou cria linha do goleador
+    found = False
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, 1).value == jogador and ws.cell(r, 3).value == comp:
+            ws.cell(r, 4).value = (ws.cell(r, 4).value or 0) + 1
+            found = True
+            break
+    if not found and jogador:
+        nr = ws.max_row + 1
+        for col, val in enumerate([jogador, time_gol, comp, 1, 0, 1], 1):
+            c = ws.cell(nr, col, val)
+            c.border = border
+            c.alignment = Alignment(horizontal="center")
+
+    # Busca ou cria linha do assistente
+    if assist:
+        found2 = False
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(r, 1).value == assist and ws.cell(r, 3).value == comp:
+                ws.cell(r, 5).value = (ws.cell(r, 5).value or 0) + 1
+                found2 = True
+                break
+        if not found2:
+            nr = ws.max_row + 1
+            time_assist = row.get("time_mand", "")
+            for col, val in enumerate([assist, time_assist, comp, 0, 1, 1], 1):
+                c = ws.cell(nr, col, val)
+                c.border = border
+                c.alignment = Alignment(horizontal="center")
+
+def _atualizar_resumo_time(wb, row):
+    """Atualiza gols marcados/sofridos por time."""
+    from openpyxl.styles import Alignment, Border, Side
+    ws = wb["Resumo por Time"]
+    thin = Side(border_style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    time_gol = row.get("time_gol", "")
+    time_mand = row.get("time_mand", "")
+    time_visit = row.get("time_visit", "")
+    comp = row.get("competicao", "")
+    time_sofreu = time_visit if time_gol == time_mand else time_mand
+
+    for time, marcou in [(time_gol, True), (time_sofreu, False)]:
+        if not time:
+            continue
+        found = False
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(r, 1).value == time and ws.cell(r, 2).value == comp:
+                if marcou:
+                    ws.cell(r, 4).value = (ws.cell(r, 4).value or 0) + 1
+                else:
+                    ws.cell(r, 5).value = (ws.cell(r, 5).value or 0) + 1
+                found = True
+                break
+        if not found:
+            nr = ws.max_row + 1
+            gols_m = 1 if marcou else 0
+            gols_s = 0 if marcou else 1
+            for col, val in enumerate([time, comp, 1, gols_m, gols_s], 1):
+                c = ws.cell(nr, col, val)
+                c.border = border
+                c.alignment = Alignment(horizontal="center")
+
+# Mantém CSV simples como backup extra
 def csv_ensure():
     if not CSV_PATH.exists():
         with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
-                "data", "hora", "timestamp_video",
-                "jogador_gol", "num_gol",
-                "jogador_assist", "num_assist", "video_origem"
+                "data","hora","competicao","time_mand","time_visit","time_gol",
+                "timestamp_video","jogador_gol","num_gol",
+                "jogador_assist","num_assist","video_origem"
             ])
 
 def csv_save(row: dict):
     csv_ensure()
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow([
-            row.get("data", ""), row.get("hora", ""),
-            row.get("timestamp_video", ""),
-            row.get("jogador_gol", ""), row.get("num_gol", ""),
-            row.get("jogador_assist", ""), row.get("num_assist", ""),
-            row.get("video_origem", ""),
+            row.get("data",""), row.get("hora",""),
+            row.get("competicao",""), row.get("time_mand",""),
+            row.get("time_visit",""), row.get("time_gol",""),
+            row.get("timestamp_video",""),
+            row.get("jogador_gol",""), row.get("num_gol",""),
+            row.get("jogador_assist",""), row.get("num_assist",""),
+            row.get("video_origem",""),
         ])
 
 # ─── VÍDEO ───────────────────────────────────────────────────────────────────
@@ -375,11 +568,16 @@ def download_csv():
     csv_ensure()
     return send_file(str(CSV_PATH.resolve()), as_attachment=True, download_name="gols.csv")
 
+@flask_app.route("/api/xlsx")
+def download_xlsx():
+    xlsx_ensure()
+    return send_file(str(XLSX_PATH.resolve()), as_attachment=True, download_name="scoutbot_dados.xlsx")
+
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 # ─── BOT ─────────────────────────────────────────────────────────────────────
-AGUARD_TIME_MAND, AGUARD_TIME_VISIT, AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_CONFIRMA_ATLETA, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST, AGUARD_CONFIRMA_ASSIST = range(9)
+AGUARD_COMPETICAO, AGUARD_COMPETICAO_OUTRO, AGUARD_TIME_MAND, AGUARD_TIME_VISIT, AGUARD_TIME_GOL, AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_CONFIRMA_ATLETA, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST, AGUARD_CONFIRMA_ASSIST = range(12)
 URL_PATTERN = re.compile(r'https?://\S+')
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -402,8 +600,13 @@ async def cmd_status(update, ctx):
 
 async def cmd_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     csv_ensure()
+    xlsx_ensure()
     await update.message.reply_document(
-        document=open(CSV_PATH, "rb"), filename="gols.csv", caption="📊 Planilha de gols"
+        document=open(CSV_PATH, "rb"), filename="gols.csv", caption="📊 Backup CSV"
+    )
+    await update.message.reply_document(
+        document=open(XLSX_PATH, "rb"), filename="scoutbot_dados.xlsx",
+        caption="📊 Planilha completa (Excel)"
     )
 
 async def handle_cookies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -571,10 +774,25 @@ async def cb_registrar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     clip = pending_clips.get(clip_id, {})
     ctx.user_data["timestamp"] = clip.get("timestamp", "?")
     ctx.user_data["video_origem"] = clip.get("video_origem", "?")
-    await query.message.reply_text(
-        f"⚽ Registrando gol — {ctx.user_data['timestamp']}\n\nTime **mandante**:",
-        parse_mode="Markdown"
+    kb = ReplyKeyboardMarkup(
+        [["LNF", "Paranaense"], ["Gaúcho", "Paulista"], ["Outro"]],
+        one_time_keyboard=True, resize_keyboard=True
     )
+    await query.message.reply_text("🏆 Qual competição?", reply_markup=kb)
+    return AGUARD_COMPETICAO
+
+async def recv_competicao(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    resp = update.message.text.strip()
+    if resp == "Outro":
+        await update.message.reply_text("Digite o nome da competição:")
+        return AGUARD_COMPETICAO_OUTRO
+    ctx.user_data["competicao"] = resp
+    await update.message.reply_text("🏟 Time *mandante*:", parse_mode="Markdown")
+    return AGUARD_TIME_MAND
+
+async def recv_competicao_outro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["competicao"] = update.message.text.strip()
+    await update.message.reply_text("🏟 Time *mandante*:", parse_mode="Markdown")
     return AGUARD_TIME_MAND
 
 async def recv_time_mand(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -584,14 +802,22 @@ async def recv_time_mand(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def recv_time_visit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["time_visit"] = update.message.text.strip()
-    # Registra +1 jogo para ambos os times
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, analise_registrar_jogo, ctx.user_data["time_mand"])
     await loop.run_in_executor(None, analise_registrar_jogo, ctx.user_data["time_visit"])
-    await update.message.reply_text(
-        f"✅ Jogo registrado: *{ctx.user_data['time_mand']}* x *{ctx.user_data['time_visit']}*\n\nNúmero da camisa do goleador:",
-        parse_mode="Markdown"
+    kb = ReplyKeyboardMarkup(
+        [[ctx.user_data["time_mand"], ctx.user_data["time_visit"]]],
+        one_time_keyboard=True, resize_keyboard=True
     )
+    await update.message.reply_text(
+        f"✅ *{ctx.user_data['time_mand']}* x *{ctx.user_data['time_visit']}*\n\nDe qual time foi o gol?",
+        parse_mode="Markdown", reply_markup=kb
+    )
+    return AGUARD_TIME_GOL
+
+async def recv_time_gol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["time_gol"] = update.message.text.strip()
+    await update.message.reply_text("Número da camisa do goleador:")
     return AGUARD_NUM_GOL
 
 async def recv_num_gol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -689,14 +915,20 @@ async def recv_confirma_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _salvar(update, ctx, num_assist, nome_assist):
     now = datetime.now()
-    csv_save({
+    row_data = {
         "data": now.strftime("%d/%m/%Y"), "hora": now.strftime("%H:%M:%S"),
+        "competicao": ctx.user_data.get("competicao", ""),
+        "time_mand": ctx.user_data.get("time_mand", ""),
+        "time_visit": ctx.user_data.get("time_visit", ""),
+        "time_gol": ctx.user_data.get("time_gol", ""),
         "timestamp_video": ctx.user_data.get("timestamp", ""),
         "jogador_gol": ctx.user_data.get("jogador_gol", ""),
         "num_gol": ctx.user_data.get("num_gol", ""),
         "jogador_assist": nome_assist, "num_assist": num_assist,
         "video_origem": ctx.user_data.get("video_origem", ""),
-    })
+    }
+    csv_save(row_data)
+    xlsx_save(row_data)
     clip_id = ctx.user_data.get("clip_id", "")
     if clip_id in pending_clips:
         try: os.remove(pending_clips[clip_id]["path"])
@@ -732,14 +964,18 @@ async def cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 def main():
     csv_ensure()
+    xlsx_ensure()
     threading.Thread(target=run_flask, daemon=True).start()
     log.info(f"🌐 Flask porta {PORT} | {PUBLIC_URL}")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_registrar, pattern=r"^gol:")],
         states={
+            AGUARD_COMPETICAO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_competicao)],
+            AGUARD_COMPETICAO_OUTRO:[MessageHandler(filters.TEXT & ~filters.COMMAND, recv_competicao_outro)],
             AGUARD_TIME_MAND:      [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_time_mand)],
             AGUARD_TIME_VISIT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_time_visit)],
+            AGUARD_TIME_GOL:       [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_time_gol)],
             AGUARD_NUM_GOL:        [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_gol)],
             AGUARD_NOME_GOL:       [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_gol)],
             AGUARD_CONFIRMA_ATLETA:[MessageHandler(filters.TEXT & ~filters.COMMAND, recv_confirma_atleta)],
