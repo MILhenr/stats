@@ -21,13 +21,15 @@ from telegram.ext import (
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8417374602:AAHgzLA5YJp3oEtCPklpgdYI-BqolIhDeW4")
 CHAT_ID    = os.environ.get("CHAT_ID",   "7125492867")
 PUBLIC_URL = os.environ.get("PUBLIC_URL") or "https://stats-production-a62b.up.railway.app"
+ANALISE_URL = os.environ.get("ANALISE_URL", "https://web-production-c33c9.up.railway.app")
+BOT_SECRET  = os.environ.get("BOT_SECRET", "scoutbot_secret_2024")
 PORT       = int(os.environ.get("PORT", 5055))
 WORK_DIR   = Path(os.environ.get("WORK_DIR", "/data"))
 CSV_PATH   = WORK_DIR / "gols.csv"
 
 SECONDS_BEFORE = 15
 MIN_STATIC     = 2.0
-DIFF_THRESHOLD = 45
+DIFF_THRESHOLD = 25
 PADDING_AFTER  = 2
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -230,12 +232,11 @@ def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
     return segments
 
 def cortar_segmento(video, start, end, output, padding=1.5):
-    start_cut = max(0, start - 20)
     subprocess.run([
         FFMPEG, "-y",
-        "-ss", str(start_cut),
+        "-ss", str(max(0, start - padding)),
         "-i", video,
-        "-t", "20",
+        "-t", str((end - start) + padding * 2),
         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
         "-c:v", "libx264", "-preset", "fast", "-crf", "28",
         "-c:a", "aac", output
@@ -265,6 +266,47 @@ def comprimir_video(input_video, output):
         "-c:a", "aac", output
     ], capture_output=True)
     return os.path.exists(output)
+
+# ─── ANALISE.IO API ──────────────────────────────────────────────────────────
+import requests as _req
+
+def _bot_headers():
+    return {"X-Bot-Secret": BOT_SECRET, "Content-Type": "application/json"}
+
+def analise_buscar_atleta(nome: str, clube: str = "") -> list:
+    try:
+        params = {"nome": nome}
+        if clube:
+            params["clube"] = clube
+        r = _req.get(f"{ANALISE_URL}/api/bot/atletas", params=params, headers=_bot_headers(), timeout=10)
+        return r.json() if r.ok else []
+    except Exception as e:
+        log.error(f"analise_buscar_atleta error: {e}")
+        return []
+
+def analise_registrar_gol(atleta_id: str) -> dict:
+    try:
+        r = _req.post(f"{ANALISE_URL}/api/bot/gol", json={"atleta_id": atleta_id}, headers=_bot_headers(), timeout=10)
+        return r.json() if r.ok else {}
+    except Exception as e:
+        log.error(f"analise_registrar_gol error: {e}")
+        return {}
+
+def analise_registrar_assistencia(atleta_id: str) -> dict:
+    try:
+        r = _req.post(f"{ANALISE_URL}/api/bot/assistencia", json={"atleta_id": atleta_id}, headers=_bot_headers(), timeout=10)
+        return r.json() if r.ok else {}
+    except Exception as e:
+        log.error(f"analise_registrar_assistencia error: {e}")
+        return {}
+
+def analise_registrar_jogo(clube: str) -> dict:
+    try:
+        r = _req.post(f"{ANALISE_URL}/api/bot/jogo", json={"clube": clube}, headers=_bot_headers(), timeout=10)
+        return r.json() if r.ok else {}
+    except Exception as e:
+        log.error(f"analise_registrar_jogo error: {e}")
+        return {}
 
 # ─── FLASK ───────────────────────────────────────────────────────────────────
 flask_app = Flask(__name__, template_folder="templates")
@@ -337,7 +379,7 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 # ─── BOT ─────────────────────────────────────────────────────────────────────
-AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST = range(5)
+AGUARD_TIME_MAND, AGUARD_TIME_VISIT, AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_CONFIRMA_ATLETA, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST, AGUARD_CONFIRMA_ASSIST = range(9)
 URL_PATTERN = re.compile(r'https?://\S+')
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -530,7 +572,24 @@ async def cb_registrar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["timestamp"] = clip.get("timestamp", "?")
     ctx.user_data["video_origem"] = clip.get("video_origem", "?")
     await query.message.reply_text(
-        f"⚽ Gol em *{ctx.user_data['timestamp']}*\n\nNúmero da camisa do goleador:",
+        f"⚽ Registrando gol — {ctx.user_data['timestamp']}\n\nTime **mandante**:",
+        parse_mode="Markdown"
+    )
+    return AGUARD_TIME_MAND
+
+async def recv_time_mand(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["time_mand"] = update.message.text.strip()
+    await update.message.reply_text("Time **visitante**:", parse_mode="Markdown")
+    return AGUARD_TIME_VISIT
+
+async def recv_time_visit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["time_visit"] = update.message.text.strip()
+    # Registra +1 jogo para ambos os times
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, analise_registrar_jogo, ctx.user_data["time_mand"])
+    await loop.run_in_executor(None, analise_registrar_jogo, ctx.user_data["time_visit"])
+    await update.message.reply_text(
+        f"✅ Jogo registrado: *{ctx.user_data['time_mand']}* x *{ctx.user_data['time_visit']}*\n\nNúmero da camisa do goleador:",
         parse_mode="Markdown"
     )
     return AGUARD_NUM_GOL
@@ -541,7 +600,40 @@ async def recv_num_gol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return AGUARD_NOME_GOL
 
 async def recv_nome_gol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["jogador_gol"] = update.message.text.strip()
+    nome = update.message.text.strip()
+    ctx.user_data["jogador_gol"] = nome
+    # Busca no analise.io
+    clube = ctx.user_data.get("time_mand", "")
+    loop = asyncio.get_event_loop()
+    atletas = await loop.run_in_executor(None, analise_buscar_atleta, nome, clube)
+    if atletas:
+        ctx.user_data["atletas_encontrados"] = atletas
+        lista = "\n".join([f"{i+1}. *{a['nome']}* — {a['clube']} ({a['posicao']}) | ⚽{a.get('stats_gols','0')} 🅰️{a.get('stats_assists','0')} 🎮{a.get('stats_jogos','0')}" for i,a in enumerate(atletas[:5])])
+        kb = ReplyKeyboardMarkup(
+            [[str(i+1) for i in range(min(len(atletas),5))], ["Não encontrado"]],
+            one_time_keyboard=True, resize_keyboard=True
+        )
+        await update.message.reply_text(
+            f"Atletas encontrados:\n{lista}\n\nQual é o correto?",
+            parse_mode="Markdown", reply_markup=kb
+        )
+        return AGUARD_CONFIRMA_ATLETA
+    else:
+        ctx.user_data["atleta_gol_id"] = None
+        kb = ReplyKeyboardMarkup([["Sim", "Não"]], one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("⚠️ Atleta não encontrado no site.\n\nTeve assistência?", reply_markup=kb)
+        return AGUARD_ASSIST
+
+async def recv_confirma_atleta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    resp = update.message.text.strip()
+    atletas = ctx.user_data.get("atletas_encontrados", [])
+    if resp.isdigit() and 1 <= int(resp) <= len(atletas):
+        atleta = atletas[int(resp)-1]
+        ctx.user_data["atleta_gol_id"] = atleta["id"]
+        ctx.user_data["jogador_gol"] = atleta["nome"]
+        await update.message.reply_text(f"✅ *{atleta['nome']}* selecionado!", parse_mode="Markdown")
+    else:
+        ctx.user_data["atleta_gol_id"] = None
     kb = ReplyKeyboardMarkup([["Sim", "Não"]], one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text("Teve assistência?", reply_markup=kb)
     return AGUARD_ASSIST
@@ -559,7 +651,40 @@ async def recv_num_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return AGUARD_NOME_ASSIST
 
 async def recv_nome_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), update.message.text.strip())
+    nome = update.message.text.strip()
+    # Busca no analise.io
+    clube = ctx.user_data.get("time_mand", "")
+    loop = asyncio.get_event_loop()
+    atletas = await loop.run_in_executor(None, analise_buscar_atleta, nome, clube)
+    if atletas:
+        ctx.user_data["atletas_assist_encontrados"] = atletas
+        lista = "\n".join([f"{i+1}. *{a['nome']}* — {a['clube']}" for i,a in enumerate(atletas[:5])])
+        kb = ReplyKeyboardMarkup(
+            [[str(i+1) for i in range(min(len(atletas),5))], ["Não encontrado"]],
+            one_time_keyboard=True, resize_keyboard=True
+        )
+        await update.message.reply_text(
+            f"Atletas encontrados:\n{lista}\n\nQual é o correto?",
+            parse_mode="Markdown", reply_markup=kb
+        )
+        ctx.user_data["nome_assist_tmp"] = nome
+        return AGUARD_CONFIRMA_ASSIST
+    else:
+        ctx.user_data["atleta_assist_id"] = None
+        await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome)
+        return ConversationHandler.END
+
+async def recv_confirma_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    resp = update.message.text.strip()
+    atletas = ctx.user_data.get("atletas_assist_encontrados", [])
+    if resp.isdigit() and 1 <= int(resp) <= len(atletas):
+        atleta = atletas[int(resp)-1]
+        ctx.user_data["atleta_assist_id"] = atleta["id"]
+        nome_assist = atleta["nome"]
+    else:
+        ctx.user_data["atleta_assist_id"] = None
+        nome_assist = ctx.user_data.get("nome_assist_tmp", "")
+    await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome_assist)
     return ConversationHandler.END
 
 async def _salvar(update, ctx, num_assist, nome_assist):
@@ -577,10 +702,26 @@ async def _salvar(update, ctx, num_assist, nome_assist):
         try: os.remove(pending_clips[clip_id]["path"])
         except: pass
         del pending_clips[clip_id]
-    assist_str = f"\n🅰️ #{num_assist} {nome_assist}" if nome_assist else ""
+    # Atualiza analise.io
+    loop = asyncio.get_event_loop()
+    atleta_gol_id = ctx.user_data.get("atleta_gol_id")
+    atleta_assist_id = ctx.user_data.get("atleta_assist_id")
+    site_gol = ""
+    site_assist = ""
+    if atleta_gol_id:
+        res = await loop.run_in_executor(None, analise_registrar_gol, atleta_gol_id)
+        if res.get("ok"):
+            site_gol = f" _(site: {res.get('gols','?')} gols)_"
+    if atleta_assist_id and nome_assist:
+        res = await loop.run_in_executor(None, analise_registrar_assistencia, atleta_assist_id)
+        if res.get("ok"):
+            site_assist = f" _(site: {res.get('assists','?')} assist.)_"
+
+    assist_str = f"\n🅰️ #{num_assist} {nome_assist}{site_assist}" if nome_assist else ""
+    jogo_str = f"\n🏟 {ctx.user_data.get('time_mand','')} x {ctx.user_data.get('time_visit','')}" if ctx.user_data.get('time_mand') else ""
     await update.message.reply_text(
-        f"✅ *Gol salvo!*\n⚽ #{ctx.user_data.get('num_gol','')} {ctx.user_data.get('jogador_gol','')}{assist_str}\n"
-        f"🕐 {ctx.user_data.get('timestamp','')}\n\n_Use /csv para baixar._",
+        f"✅ *Gol salvo!*\n⚽ #{ctx.user_data.get('num_gol','')} {ctx.user_data.get('jogador_gol','')}{site_gol}{assist_str}{jogo_str}\n"
+        f"🕐 {ctx.user_data.get('timestamp','')}\n\n_Salvo no CSV e no site!_ 🌐",
         parse_mode="Markdown"
     )
 
@@ -597,11 +738,15 @@ def main():
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_registrar, pattern=r"^gol:")],
         states={
-            AGUARD_NUM_GOL:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_gol)],
-            AGUARD_NOME_GOL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_gol)],
-            AGUARD_ASSIST:      [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_assist)],
-            AGUARD_NUM_ASSIST:  [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_assist)],
-            AGUARD_NOME_ASSIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_assist)],
+            AGUARD_TIME_MAND:      [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_time_mand)],
+            AGUARD_TIME_VISIT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_time_visit)],
+            AGUARD_NUM_GOL:        [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_gol)],
+            AGUARD_NOME_GOL:       [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_gol)],
+            AGUARD_CONFIRMA_ATLETA:[MessageHandler(filters.TEXT & ~filters.COMMAND, recv_confirma_atleta)],
+            AGUARD_ASSIST:         [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_assist)],
+            AGUARD_NUM_ASSIST:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_assist)],
+            AGUARD_NOME_ASSIST:    [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_assist)],
+            AGUARD_CONFIRMA_ASSIST:[MessageHandler(filters.TEXT & ~filters.COMMAND, recv_confirma_assist)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
         allow_reentry=True,
