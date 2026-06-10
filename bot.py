@@ -868,8 +868,7 @@ async def recv_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message.text.strip().lower() in ("sim", "s"):
         await update.message.reply_text("Número da camisa de quem assistiu:")
         return AGUARD_NUM_ASSIST
-    await _salvar(update, ctx, "", "")
-    return ConversationHandler.END
+    return await _salvar(update, ctx, "", "")
 
 async def recv_num_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["num_assist"] = update.message.text.strip()
@@ -897,8 +896,7 @@ async def recv_nome_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return AGUARD_CONFIRMA_ASSIST
     else:
         ctx.user_data["atleta_assist_id"] = None
-        await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome)
-        return ConversationHandler.END
+        return await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome)
 
 async def recv_confirma_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     resp = update.message.text.strip()
@@ -910,8 +908,7 @@ async def recv_confirma_assist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         ctx.user_data["atleta_assist_id"] = None
         nome_assist = ctx.user_data.get("nome_assist_tmp", "")
-    await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome_assist)
-    return ConversationHandler.END
+    return await _salvar(update, ctx, ctx.user_data.get("num_assist", ""), nome_assist)
 
 async def _salvar(update, ctx, num_assist, nome_assist):
     now = datetime.now()
