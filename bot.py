@@ -974,20 +974,21 @@ async def recv_mais_gols(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Manda planilha e encerra
         try:
             xlsx_ensure()
+            caption = (
+                f"📊 *Planilha atualizada!*\n"
+                f"🏆 {ctx.user_data.get('competicao','')}\n"
+                f"🏟 {ctx.user_data.get('time_mand','')} x {ctx.user_data.get('time_visit','')}"
+            )
             with open(XLSX_PATH, "rb") as f:
                 await update.message.reply_document(
                     document=f,
                     filename="scoutbot_dados.xlsx",
-                    caption=(
-                        f"📊 *Planilha atualizada!*\n"
-                        f"🏆 {ctx.user_data.get('competicao','')}\n"
-                        f"🏟 {ctx.user_data.get('time_mand','')} x {ctx.user_data.get('time_visit','')}",
-                    ),
+                    caption=caption,
                     parse_mode="Markdown"
                 )
         except Exception as e:
             log.error(f"Erro ao enviar planilha: {e}")
-            await update.message.reply_text("✅ Jogo encerrado! Use /csv para baixar a planilha.")
+            await update.message.reply_text(f"✅ Jogo encerrado! Use /csv para baixar a planilha.\nErro: {e}")
         return ConversationHandler.END
 
 async def cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
