@@ -230,11 +230,12 @@ def detectar_segmentos(video_path: str, X, Y, W, H) -> list:
     return segments
 
 def cortar_segmento(video, start, end, output, padding=1.5):
+    start_cut = max(0, start - 20)
     subprocess.run([
         FFMPEG, "-y",
-        "-ss", str(max(0, start - padding)),
+        "-ss", str(start_cut),
         "-i", video,
-        "-t", str((end - start) + padding * 2),
+        "-t", "20",
         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
         "-c:v", "libx264", "-preset", "fast", "-crf", "28",
         "-c:a", "aac", output
