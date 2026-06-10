@@ -577,7 +577,7 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 # ─── BOT ─────────────────────────────────────────────────────────────────────
-AGUARD_COMPETICAO, AGUARD_COMPETICAO_OUTRO, AGUARD_TIME_MAND, AGUARD_TIME_VISIT, AGUARD_TIME_GOL, AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_CONFIRMA_ATLETA, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST, AGUARD_CONFIRMA_ASSIST = range(12)
+AGUARD_COMPETICAO, AGUARD_COMPETICAO_OUTRO, AGUARD_TIME_MAND, AGUARD_TIME_VISIT, AGUARD_TIME_GOL, AGUARD_NUM_GOL, AGUARD_NOME_GOL, AGUARD_CONFIRMA_ATLETA, AGUARD_ASSIST, AGUARD_NUM_ASSIST, AGUARD_NOME_ASSIST, AGUARD_CONFIRMA_ASSIST, AGUARD_MAIS_GOLS = range(13)
 URL_PATTERN = re.compile(r'https?://\S+')
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -956,6 +956,39 @@ async def _salvar(update, ctx, num_assist, nome_assist):
         f"🕐 {ctx.user_data.get('timestamp','')}\n\n_Salvo no CSV e no site!_ 🌐",
         parse_mode="Markdown"
     )
+    kb = ReplyKeyboardMarkup([["Sim", "Não"]], one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text("Tem mais gols nesse jogo para registrar?", reply_markup=kb)
+    return AGUARD_MAIS_GOLS
+
+async def recv_mais_gols(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    resp = update.message.text.strip().lower()
+    if resp in ("sim", "s"):
+        # Volta para perguntar de qual time foi o gol (mantém jogo/competição)
+        kb = ReplyKeyboardMarkup(
+            [[ctx.user_data.get("time_mand",""), ctx.user_data.get("time_visit","")]],
+            one_time_keyboard=True, resize_keyboard=True
+        )
+        await update.message.reply_text("⚽ De qual time foi o próximo gol?", reply_markup=kb)
+        return AGUARD_TIME_GOL
+    else:
+        # Manda planilha e encerra
+        try:
+            xlsx_ensure()
+            with open(XLSX_PATH, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename="scoutbot_dados.xlsx",
+                    caption=(
+                        f"📊 *Planilha atualizada!*\n"
+                        f"🏆 {ctx.user_data.get('competicao','')}\n"
+                        f"🏟 {ctx.user_data.get('time_mand','')} x {ctx.user_data.get('time_visit','')}",
+                    ),
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            log.error(f"Erro ao enviar planilha: {e}")
+            await update.message.reply_text("✅ Jogo encerrado! Use /csv para baixar a planilha.")
+        return ConversationHandler.END
 
 async def cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelado.")
@@ -983,6 +1016,7 @@ def main():
             AGUARD_NUM_ASSIST:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_num_assist)],
             AGUARD_NOME_ASSIST:    [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_nome_assist)],
             AGUARD_CONFIRMA_ASSIST:[MessageHandler(filters.TEXT & ~filters.COMMAND, recv_confirma_assist)],
+            AGUARD_MAIS_GOLS:      [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_mais_gols)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
         allow_reentry=True,
